@@ -21,22 +21,22 @@ class AudioEnhancer:
         self.sample_rate = sample_rate
         
         # AGC (Automatic Gain Control) - OPTIMIZADO para voz clara
-        self.target_rms = 4500  # Nivel RMS objetivo aumentado para mejor claridad
+        self.target_rms = 5000  # Nivel RMS objetivo aumentado para máxima claridad
         self.current_gain = 1.0
-        self.gain_smoothing = 0.90  # Más responsive (era 0.95)
-        self.min_gain = 0.3  # Permite más reducción si es necesario
-        self.max_gain = 6.0  # Amplificación mayor para voces bajas (era 4.0)
+        self.gain_smoothing = 0.85  # Más responsive (era 0.95)
+        self.min_gain = 0.5  # Permite reducción moderada
+        self.max_gain = 8.0  # Amplificación mayor para voces bajas (antes 4.0)
         
         # Anti-clipping mejorado
         self.clipping_threshold = 31000  # Umbral antes del máximo (32767)
         self.clipping_ratio = 0.85  # Reducir al 85% si hay clipping
         
-        # Noise gate adaptativo - MUY SENSIBLE para VAD
+        # Noise gate adaptativo - INTELIGENTE
         self.noise_floor = None
-        self.noise_samples = deque(maxlen=100)  # Más muestras para mejor calibración
-        self.noise_gate_threshold = 50  # Umbral MUY bajo = muy sensible a voz
-        self.gate_attack = 0.003  # Apertura ULTRA-rápida (3ms) - no corta inicio
-        self.gate_release = 0.150   # Cierre más suave (150ms) - transiciones naturales
+        self.noise_samples = deque(maxlen=150)  # Más muestras para calibración robusta
+        self.noise_gate_threshold = 200  # Threshold inicial conservador
+        self.gate_attack = 0.002  # Apertura muy rápida (2ms) - no pierde inicio
+        self.gate_release = 0.120   # Cierre suave (120ms) - transiciones naturales
         self.gate_state = 0.0     # 0 = cerrado, 1 = abierto
         
         # Smoothing general
@@ -53,18 +53,30 @@ class AudioEnhancer:
         self.buffer_lock = threading.Lock()
         
     def calibrate_noise(self, audio_data):
-        """Calibra el nivel de ruido de fondo adaptándose al ambiente"""
+        """
+        Calibración inteligente del nivel de ruido
+        Toma múltiples muestras y usa estadísticas robustas
+        """
         audio_array = np.frombuffer(audio_data, dtype=np.int16)
         rms = np.sqrt(np.mean(audio_array.astype(np.float32) ** 2))
         
         self.noise_samples.append(rms)
         
-        if len(self.noise_samples) >= 10:
-            # Usar percentil 25 como ruido de fondo (ignorar picos)
-            self.noise_floor = np.percentile(list(self.noise_samples), 25)
-            # Threshold mínimo de 30 para evitar bloqueo total si hay silencio
-            self.noise_gate_threshold = max(30, self.noise_floor * 1.2)
-            print(f"[CALIBRACIÓN] ✅ Threshold: {self.noise_gate_threshold:.0f}")
+        if len(self.noise_samples) >= 20:  # Más muestras = mejor calibración
+            # Usar percentil 30 como ruido de fondo (más robusto)
+            self.noise_floor = np.percentile(list(self.noise_samples), 30)
+            
+            # Calcular desviación estándar para detectar variabilidad
+            noise_std = np.std(list(self.noise_samples))
+            
+            # Threshold adaptativo basado en ruido y variabilidad
+            # Si hay mucha variabilidad = ambiente ruidoso, threshold más alto
+            adaptive_multiplier = 2.2 + (noise_std / self.noise_floor) * 0.5
+            adaptive_multiplier = min(adaptive_multiplier, 3.5)  # Limitar
+            
+            self.noise_gate_threshold = max(180, self.noise_floor * adaptive_multiplier)
+            
+            print(f"[CALIBRACIÓN] ✅ Ruido: {self.noise_floor:.0f} | Variabilidad: {noise_std:.0f} | Threshold: {self.noise_gate_threshold:.0f} (x{adaptive_multiplier:.1f})")
             return True
         return False
     
@@ -74,15 +86,16 @@ class AudioEnhancer:
     
     def apply_agc(self, audio_data):
         """
-        Automatic Gain Control - Ajusta el volumen automáticamente
-        para mantener un nivel consistente
+        Automatic Gain Control mejorado - Ajusta el volumen automáticamente
+        con detección de silencio para evitar amplificar ruido
         """
         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
         
         # Calcular RMS actual
         current_rms = self.calculate_rms(audio_array)
         
-        if current_rms > 0:
+        # Solo aplicar AGC si hay señal significativa (no es ruido puro)
+        if current_rms > self.noise_gate_threshold * 0.5:  # 50% del threshold
             # Calcular ganancia necesaria
             desired_gain = self.target_rms / current_rms
             
@@ -94,9 +107,12 @@ class AudioEnhancer:
                 self.gain_smoothing * self.current_gain +
                 (1 - self.gain_smoothing) * desired_gain
             )
+        else:
+            # Es ruido, no amplificar
+            self.current_gain = max(0.5, self.current_gain * 0.95)  # Decay
             
-            # Aplicar ganancia
-            audio_array *= self.current_gain
+        # Aplicar ganancia
+        audio_array *= self.current_gain
         
         return audio_array
     

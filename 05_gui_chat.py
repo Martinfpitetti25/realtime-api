@@ -924,11 +924,11 @@ class RealtimeGUIChat:
                     delattr(self, 'current_audio_transcript')
                 
                 # INTERRUPCIÓN: Asistente terminó de hablar
-                # Mantener el micrófono mutado 1 segundo extra para evitar captar eco
+                # Mantener el micrófono mutado 1 segundo para evitar captar eco
                 def unmute_mic():
-                    time.sleep(1.0)  # Esperar a que el eco del parlante desaparezca
+                    time.sleep(1.0)  # Esperar eco del parlante
                     self.assistant_speaking = False
-                    print("[MIC] ✅ Micrófono reactivado (eco eliminado)")
+                    print("[MIC] ✅ Micrófono reactivado")
                 
                 threading.Thread(target=unmute_mic, daemon=True).start()
                 self.root.after(0, self.update_activity_status, 'idle', '#95a5a6')
@@ -1019,9 +1019,9 @@ class RealtimeGUIChat:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.3,       # Más sensible para detectar voz baja
-                    "prefix_padding_ms": 500, # Más contexto para no cortar inicio
-                    "silence_duration_ms": 500  # Balance entre corte rápido y natural
+                    "threshold": 0.4,       # Balance bueno entre sensibilidad y precisión
+                    "prefix_padding_ms": 500, # Contexto completo
+                    "silence_duration_ms": 800  # 0.8s - evita responder muy rápido
                 }
             })
         
@@ -1113,7 +1113,8 @@ class RealtimeGUIChat:
             features = ["VAD Automático", "AGC", "Noise Gate"]
             features_str = " + ".join(features)
             self.append_message("Sistema", f"🎤 Modo manos libres activado | {features_str}", 'system')
-            self.append_message("Sistema", "💡 Habla libremente - el sistema detecta automáticamente tu voz", 'system')
+            self.append_message("Sistema", "� Calibrando ruido ambiente... (permanece en silencio 2 segundos)", 'system')
+            self.append_message("Sistema", "💡 Después habla normalmente - el sistema filtra el ruido automáticamente", 'system')
         else:
             self.append_message("Sistema", f"🎤 Modo manos libres activado", 'system')
         
