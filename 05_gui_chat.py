@@ -1019,9 +1019,9 @@ class RealtimeGUIChat:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.4,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700
+                    "threshold": 0.3,       # Más sensible para detectar voz baja
+                    "prefix_padding_ms": 500, # Más contexto para no cortar inicio
+                    "silence_duration_ms": 500  # Balance entre corte rápido y natural
                 }
             })
         
@@ -1242,6 +1242,11 @@ class RealtimeGUIChat:
                             print("[DEBUG] Fin de mensaje de audio, esperando siguiente...")
                             continue
                     
+                    # Chequear interrupción antes de reproducir
+                    if self.user_interrupted:
+                        print("[DEBUG] Reproducción interrumpida por usuario")
+                        continue
+                    
                     # El audio ya viene en 24kHz de la API, reproducir directamente sin resample
                     stream.write(audio_chunk)
                 except queue.Empty:
@@ -1311,7 +1316,14 @@ class RealtimeGUIChat:
             self.ws.send(json.dumps(cancel_event))
             print("[INTERRUPT] 📨 Cancelación enviada a API")
             
-            # Limpiar buffers de audio
+            # Limpiar buffer de entrada de audio (nuevo audio del usuario)
+            clear_event = {
+                "type": "input_audio_buffer.clear"
+            }
+            self.ws.send(json.dumps(clear_event))
+            print("[INTERRUPT] 🧹 Buffer de entrada limpiado")
+            
+            # Limpiar buffers de audio de salida
             self.clear_audio_buffers()
             
         except Exception as e:

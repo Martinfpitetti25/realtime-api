@@ -9,7 +9,17 @@ import pyaudio
 import websocket
 import threading
 import queue
+import sys
 from dotenv import load_dotenv
+
+# Agregar directorio raíz al path para importar utils
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from utils.audio_enhancer import AudioEnhancer
+    AUDIO_ENHANCER_AVAILABLE = True
+except ImportError:
+    AUDIO_ENHANCER_AVAILABLE = False
+    print("⚠️  AudioEnhancer no disponible, usando audio sin procesar")
 
 load_dotenv()
 
@@ -19,7 +29,7 @@ MODEL = 'gpt-realtime-mini'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
 # Audio
-CHUNK = 2048  # Buffer más grande para Raspberry Pi
+CHUNK = 1024  # Buffer reducido para menor latencia
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 24000
@@ -60,6 +70,10 @@ class RaspberryPiVoiceChat:
         self.output_queue = queue.Queue()
         self.input_device = input_device
         self.output_device = output_device
+        # Procesador de audio para mejorar detección de voz
+        self.audio_enhancer = AudioEnhancer(sample_rate=RATE) if AUDIO_ENHANCER_AVAILABLE else None
+        if self.audio_enhancer:
+            print("✅ AudioEnhancer activado (AGC + noise gate + pre-énfasis)")
         
     def on_message(self, ws, message):
         """Callback cuando se recibe un mensaje"""
@@ -129,9 +143,9 @@ class RaspberryPiVoiceChat:
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,
-                    "prefix_padding_ms": 300,
-                    "silence_duration_ms": 700  # Un poco más largo para Raspberry Pi
+                    "threshold": 0.3,       # Más sensible (0.5 perdía voz baja)
+                    "prefix_padding_ms": 500, # Más contexto antes del habla
+                    "silence_duration_ms": 600  # Balance entre corte y espera
                 },
                 "temperature": 0.8,
             }
@@ -168,6 +182,9 @@ class RaspberryPiVoiceChat:
                 try:
                     data = stream.read(CHUNK, exception_on_overflow=False)
                     if self.connected:
+                        # Procesar audio con AudioEnhancer si está disponible
+                        if self.audio_enhancer:
+                            data = self.audio_enhancer.process_input(data)
                         self.send_audio_chunk(data)
                 except Exception as e:
                     print(f"⚠️  Error leyendo audio: {e}")
