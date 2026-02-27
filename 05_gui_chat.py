@@ -53,6 +53,14 @@ except ImportError:
     AUDIO_DEVICE_MANAGER_AVAILABLE = False
     print("[WARNING] AudioDeviceManager no disponible - usando dispositivos por defecto")
 
+try:
+    import pvporcupine
+    PORCUPINE_AVAILABLE = True
+    print("[DEBUG] Porcupine importado correctamente - PORCUPINE_AVAILABLE = True")
+except ImportError:
+    PORCUPINE_AVAILABLE = False
+    print("[WARNING] Porcupine no disponible - wake word desactivado")
+
 load_dotenv()
 
 # Configuración
@@ -70,6 +78,11 @@ FORMAT = pyaudio.paInt16 if AUDIO_AVAILABLE else None
 CHANNELS = 1
 RATE_API = 24000  # Requerido por OpenAI Realtime API
 RATE_HW = 48000   # Hardware rate (se auto-detecta)
+
+# Configuración de Wake Word (Porcupine)
+PORCUPINE_ACCESS_KEY = os.getenv('PORCUPINE_ACCESS_KEY', '')  # Obtener de .env
+DEFAULT_WAKE_WORD = 'jarvis'  # Wake word por defecto
+WAKE_WORD_CONFIRMATION = "Estoy aquí"  # Frase de confirmación
 
 class RealtimeGUIChat:
     def __init__(self, root):
@@ -157,6 +170,15 @@ class RealtimeGUIChat:
         # Contador de costos GPT-4V
         self.gpt4v_analyses_count = 0
         self.gpt4v_total_cost = 0.0
+        
+        # Wake Word Detection (Porcupine)
+        self.wake_word_enabled = False
+        self.porcupine = None
+        self.wake_word_thread = None
+        self.wake_word_listening = False
+        self.waiting_for_wake_word = False
+        self.wake_word = DEFAULT_WAKE_WORD
+        self.wake_word_confirmation = WAKE_WORD_CONFIRMATION
         
         # Configuración personalizable
         self.voice = "alloy"
@@ -962,6 +984,11 @@ class RealtimeGUIChat:
                 else:
                     # Si fue interrumpido, limpiar buffers
                     self.clear_audio_buffers()
+                
+                # WAKE WORD: Si está en modo voz con wake word, volver a escuchar
+                if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled and not self.recording:
+                    print("[WAKE WORD] Asistente terminó de hablar, volviendo a escuchar wake word...")
+                    self.root.after(500, self.start_wake_word_listening)
                     
             elif event_type == 'error':
                 error = data.get('error', {})
@@ -1068,11 +1095,23 @@ class RealtimeGUIChat:
             self.record_button.config(state=tk.NORMAL if self.connected else tk.DISABLED)
             self.append_message("Sistema", "✓ Modo voz activado", 'system')
             
-            # AUTO-START: Iniciar grabación automáticamente después de 500ms
-            if self.connected and not self.recording:
-                print("[DEBUG] Auto-iniciando grabación en 500ms...")
+            # WAKE WORD: Iniciar detección de wake word automáticamente
+            if self.connected and not self.recording and PORCUPINE_AVAILABLE:
+                print("[DEBUG] Auto-iniciando wake word detection en 500ms...")
+                self.root.after(500, self.start_wake_word_listening)
+            elif self.connected and not self.recording:
+                # Sin Porcupine, modo normal
+                print("[DEBUG] Auto-iniciando grabación en 500ms (sin wake word)...")
                 self.root.after(500, self.start_recording)
         else:
+            # Detener wake word si está activo
+            if self.wake_word_listening:
+                self.stop_wake_word_listening()
+            
+            # Detener grabación si está activa
+            if self.recording:
+                self.stop_recording()
+            
             self.mode_label.config(text="Modo: Texto 💬", fg='#7f8c8d')
             self.mode_button.config(text="🎤 Modo Voz", bg='#9b59b6')
             self.record_button.pack_forget()
@@ -1130,6 +1169,199 @@ class RealtimeGUIChat:
         self.recording = False
         self.record_button.config(text="🎤 Iniciar", bg='#e74c3c')
         self.append_message("Sistema", "⏸️ Modo manos libres detenido", 'system')
+        
+        # Si está en modo voz con wake word, volver a escuchar
+        if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled:
+            print("[DEBUG] Volviendo a escuchar wake word después de detener grabación...")
+            self.root.after(1000, self.start_wake_word_listening)
+    
+    # ========== WAKE WORD DETECTION (PORCUPINE) ==========
+    
+    def init_porcupine(self):
+        """Inicializa Porcupine para detección de wake word"""
+        if not PORCUPINE_AVAILABLE or not self.audio_available:
+            print("[WAKE WORD] Porcupine no disponible")
+            return False
+        
+        if not PORCUPINE_ACCESS_KEY:
+            print("[WAKE WORD] ⚠️ Necesitas configurar PORCUPINE_ACCESS_KEY en .env")
+            print("[WAKE WORD] Obtén tu access key gratis en: https://console.picovoice.ai/")
+            self.append_message("Sistema", "⚠️ Wake word requiere PORCUPINE_ACCESS_KEY en .env", 'system')
+            self.append_message("Sistema", "Obtén tu key gratis en: https://console.picovoice.ai/", 'system')
+            return False
+        
+        try:
+            print(f"[WAKE WORD] Intentando inicializar con wake word: '{self.wake_word}'")
+            self.porcupine = pvporcupine.create(
+                access_key=PORCUPINE_ACCESS_KEY,
+                keywords=[self.wake_word]
+            )
+            print(f"[WAKE WORD] ✅ Porcupine inicializado - Escuchando: '{self.wake_word}'")
+            return True
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[WAKE WORD] ❌ Error inicializando Porcupine: {error_msg}")
+            
+            # Mensajes específicos según el error
+            if "invalid" in error_msg.lower() or "authentication" in error_msg.lower():
+                self.append_message("Sistema", "❌ Access Key inválida o expirada", 'system')
+                self.append_message("Sistema", "Verifica tu PORCUPINE_ACCESS_KEY en .env", 'system')
+            elif "keyword" in error_msg.lower():
+                self.append_message("Sistema", f"❌ Wake word '{self.wake_word}' no disponible", 'system')
+                self.append_message("Sistema", "Prueba: 'computer' o 'alexa'", 'system')
+            else:
+                self.append_message("Sistema", f"❌ Error wake word: {error_msg[:80]}", 'system')
+            
+            self.append_message("Sistema", "ℹ️ Continuando en modo voz sin wake word", 'system')
+            return False
+    
+    def cleanup_porcupine(self):
+        """Limpia recursos de Porcupine"""
+        if self.porcupine:
+            try:
+                self.porcupine.delete()
+                self.porcupine = None
+                print("[WAKE WORD] Porcupine limpiado")
+            except Exception as e:
+                print(f"[WAKE WORD] Error limpiando Porcupine: {e}")
+    
+    def start_wake_word_listening(self):
+        """Inicia el thread de escucha de wake word"""
+        if not self.init_porcupine():
+            # Si falla, usar modo normal sin wake word
+            self.wake_word_enabled = False
+            self.start_recording()
+            return
+        
+        self.wake_word_enabled = True
+        self.waiting_for_wake_word = True
+        self.wake_word_listening = True
+        
+        # Actualizar UI
+        self.record_button.config(text="👂 Esperando Wake Word", bg='#f39c12')
+        self.append_message("Sistema", f"👂 Esperando wake word: '{self.wake_word}'", 'system')
+        self.append_message("Sistema", f"💡 Di '{self.wake_word}' para activar el asistente", 'system')
+        
+        # Iniciar thread
+        self.wake_word_thread = threading.Thread(target=self.listen_for_wake_word, daemon=True)
+        self.wake_word_thread.start()
+    
+    def stop_wake_word_listening(self):
+        """Detiene la escucha de wake word"""
+        self.wake_word_listening = False
+        self.waiting_for_wake_word = False
+        self.cleanup_porcupine()
+        
+        if self.wake_word_thread and self.wake_word_thread.is_alive():
+            self.wake_word_thread.join(timeout=1.0)
+    
+    def listen_for_wake_word(self):
+        """Thread que escucha continuamente la wake word"""
+        try:
+            # Detectar rate soportado
+            if self.find_supported_rate() is None:
+                print("[WAKE WORD] No se pudo encontrar rate soportado")
+                return
+            
+            # Porcupine requiere 16kHz
+            porcupine_rate = 16000
+            porcupine_chunk = self.porcupine.frame_length
+            
+            # Preparar stream
+            stream_kwargs = {
+                'format': FORMAT,
+                'channels': CHANNELS,
+                'rate': porcupine_rate,
+                'input': True,
+                'frames_per_buffer': porcupine_chunk
+            }
+            
+            if self.input_device_index is not None:
+                stream_kwargs['input_device_index'] = self.input_device_index
+            
+            stream = self.audio.open(**stream_kwargs)
+            print(f"[WAKE WORD] 👂 Escuchando wake word... ({porcupine_rate} Hz)")
+            
+            while self.wake_word_listening and self.waiting_for_wake_word:
+                try:
+                    pcm = stream.read(porcupine_chunk, exception_on_overflow=False)
+                    pcm = np.frombuffer(pcm, dtype=np.int16)
+                    
+                    keyword_index = self.porcupine.process(pcm)
+                    
+                    if keyword_index >= 0:
+                        print(f"[WAKE WORD] ✅ Wake word '{self.wake_word}' detectada!")
+                        self.root.after(0, self.on_wake_word_detected)
+                        break  # Salir del loop de escucha
+                    
+                except Exception as e:
+                    if self.wake_word_listening:
+                        print(f"[WAKE WORD] Error: {e}")
+                    break
+            
+            stream.stop_stream()
+            stream.close()
+            print("[WAKE WORD] 👂 Detenido")
+            
+        except Exception as e:
+            print(f"[WAKE WORD] ❌ Error en thread: {e}")
+            self.root.after(0, self.append_message, "Error", f"Wake word: {e}", 'system')
+    
+    def on_wake_word_detected(self):
+        """Callback cuando se detecta la wake word"""
+        print("[WAKE WORD] Procesando detección...")
+        
+        # Detener escucha de wake word
+        self.waiting_for_wake_word = False
+        
+        # Actualizar UI
+        self.record_button.config(text="🎙️ Wake Word Detectada!", bg='#27ae60')
+        self.append_message("Usuario", f"[{self.wake_word}]", 'user')
+        
+        # Enviar confirmación al asistente
+        self.send_confirmation_message()
+        
+        # Esperar un momento para que se reproduzca la confirmación
+        # Luego iniciar grabación normal
+        self.root.after(100, self.transition_to_recording)
+    
+    def send_confirmation_message(self):
+        """Envía mensaje de confirmación 'Estoy aquí' al asistente"""
+        if self.connected and self.ws:
+            event = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"[WAKE WORD DETECTADA - Responde solo: '{self.wake_word_confirmation}']"
+                        }
+                    ]
+                }
+            }
+            self.ws.send(json.dumps(event))
+            
+            # Solicitar respuesta
+            response_event = {"type": "response.create"}
+            self.ws.send(json.dumps(response_event))
+            
+            print(f"[WAKE WORD] Enviando confirmación: '{self.wake_word_confirmation}'")
+    
+    def transition_to_recording(self):
+        """Transición de wake word a grabación normal"""
+        # Esperar a que termine de hablar el asistente
+        if self.assistant_speaking:
+            print("[WAKE WORD] Esperando que termine la confirmación...")
+            self.root.after(500, self.transition_to_recording)
+            return
+        
+        # Iniciar grabación normal
+        print("[WAKE WORD] Iniciando grabación de usuario...")
+        self.start_recording()
+    
+    # ========== FIN WAKE WORD DETECTION ==========
         
     def record_audio(self):
         try:

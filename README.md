@@ -4,6 +4,14 @@ Sistema de asistente de voz multimodal que combina **OpenAI Realtime API** con *
 
 ## ✨ Características Principales
 
+### 🎙️ Wake Word Detection (Nuevo!)
+- **Activación por voz** con palabras clave: "Jarvis", "Alexa", "Computer"
+- Detección offline con **Porcupine** (latencia <100ms)
+- Confirmación auditiva personalizable: "Estoy aquí"
+- Solo activo en **Modo Voz** (modo texto no afectado)
+- Plan gratuito: 3,000 detecciones/mes
+- Ver guía completa: [WAKE_WORD_SETUP.md](WAKE_WORD_SETUP.md)
+
 ### Audio Profesional 🎙️
 - **PipeWire** con latencia ultra-baja (2-5ms)
 - Soporte completo para **audio Bluetooth** (A2DP, AAC, aptX)
@@ -89,6 +97,11 @@ pip install -r requirements.txt
 # 3. Configurar API Key
 copy .env.example .env
 # Editar .env y agregar tu OPENAI_API_KEY
+
+# 4. (Opcional) Configurar Wake Word Detection
+# Obtén tu Porcupine Access Key gratis en: https://console.picovoice.ai/
+# Agrégala al archivo .env como: PORCUPINE_ACCESS_KEY=tu_key_aqui
+# Ver guía completa en WAKE_WORD_SETUP.md
 ```
 
 ⚠️ **Importante:** Usa una API key que empiece con `sk-` (no `tsk-proj-`) y que tenga acceso a Realtime API.

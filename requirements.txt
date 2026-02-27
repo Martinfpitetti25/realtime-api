@@ -5,6 +5,9 @@ numpy>=1.24.0
 scipy>=1.4.1
 requests>=2.31.0
 
+# Wake Word Detection (opcional)
+pvporcupine>=3.0.0
+
 # Computer Vision (para detección de objetos)
 opencv-contrib-python>=4.12.0
 ultralytics>=8.0.196
