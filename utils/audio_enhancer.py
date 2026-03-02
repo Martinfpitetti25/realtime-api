@@ -7,11 +7,13 @@ Mejoras implementadas:
 - Smoothing para transiciones suaves
 - Double buffering para playback sin cortes
 - Pre-énfasis de frecuencias de voz (300-3400 Hz)
+- Filtro pasa-banda para eliminar frecuencias no-vocales
 """
 import numpy as np
 import queue
 import threading
 from collections import deque
+from scipy import signal as scipy_signal
 
 
 class AudioEnhancer:
@@ -21,11 +23,11 @@ class AudioEnhancer:
         self.sample_rate = sample_rate
         
         # AGC (Automatic Gain Control) - OPTIMIZADO para voz clara
-        self.target_rms = 5000  # Nivel RMS objetivo aumentado para máxima claridad
+        self.target_rms = 5500  # Nivel RMS optimizado para Whisper
         self.current_gain = 1.0
-        self.gain_smoothing = 0.85  # Más responsive (era 0.95)
-        self.min_gain = 0.5  # Permite reducción moderada
-        self.max_gain = 8.0  # Amplificación mayor para voces bajas (antes 4.0)
+        self.gain_smoothing = 0.92  # Muy suave para preservar fonemas
+        self.min_gain = 0.9  # Mínima reducción para mantener consistencia
+        self.max_gain = 5.0  # Amplificación moderada sin distorsión
         
         # Anti-clipping mejorado
         self.clipping_threshold = 31000  # Umbral antes del máximo (32767)
@@ -33,24 +35,53 @@ class AudioEnhancer:
         
         # Noise gate adaptativo - INTELIGENTE
         self.noise_floor = None
-        self.noise_samples = deque(maxlen=150)  # Más muestras para calibración robusta
-        self.noise_gate_threshold = 200  # Threshold inicial conservador
-        self.gate_attack = 0.002  # Apertura muy rápida (2ms) - no pierde inicio
-        self.gate_release = 0.120   # Cierre suave (120ms) - transiciones naturales
+        self.noise_samples = deque(maxlen=200)  # Más muestras para mejor calibración
+        self.noise_gate_threshold = 280  # Threshold optimizado para español
+        self.gate_attack = 0.002  # 2ms - balance entre rapidez y estabilidad
+        self.gate_release = 0.150   # 150ms - mantener contexto fonético
         self.gate_state = 0.0     # 0 = cerrado, 1 = abierto
         
         # Smoothing general
         self.last_output_level = 0
         self.smoothing_factor = 0.75  # Más suave
         
-        # Pre-énfasis para frecuencias de voz (NUEVO)
-        self.pre_emphasis_alpha = 0.97  # Factor de pre-énfasis
+        # Pre-énfasis para frecuencias de voz (AJUSTADO)
+        self.pre_emphasis_alpha = 0.95  # Factor reducido para preservar naturalidad
         self.last_sample = 0
+        
+        # Filtro pasa-banda para voz (200-4000 Hz) - AJUSTADO PARA ESPAÑOL
+        self.use_bandpass = True  # Activar/desactivar filtro
+        self.bandpass_low = 200   # Más bajo para capturar mejor vocales graves (español)
+        self.bandpass_high = 4000 # Más alto para capturar consonantes sibilantes (s, z, ch)
+        self._init_bandpass_filter()
         
         # Double buffering para playback
         # Buffer más grande para evitar pérdida de chunks de audio
         self.playback_buffer = queue.Queue(maxsize=100)
         self.buffer_lock = threading.Lock()
+    
+    def _init_bandpass_filter(self):
+        """Inicializa el filtro pasa-banda Butterworth"""
+        try:
+            # Filtro Butterworth de orden 3 (más suave, menos distorsión de fase)
+            nyquist = self.sample_rate / 2
+            low = self.bandpass_low / nyquist
+            high = self.bandpass_high / nyquist
+            
+            # Asegurar que las frecuencias estén en el rango válido
+            low = max(0.01, min(low, 0.99))
+            high = max(0.01, min(high, 0.99))
+            
+            if low < high:
+                self.sos = scipy_signal.butter(3, [low, high], btype='band', output='sos')
+                self.zi = scipy_signal.sosfilt_zi(self.sos)
+                print(f"[AUDIO] ✅ Filtro pasa-banda inicializado ({self.bandpass_low}-{self.bandpass_high} Hz)")
+            else:
+                self.use_bandpass = False
+                print("[AUDIO] ⚠️ Filtro pasa-banda desactivado - frecuencias inválidas")
+        except Exception as e:
+            self.use_bandpass = False
+            print(f"[AUDIO] ⚠️ Error inicializando filtro: {e}")
         
     def calibrate_noise(self, audio_data):
         """
@@ -194,13 +225,31 @@ class AudioEnhancer:
         
         return emphasized
     
+    def apply_bandpass_filter(self, audio_array):
+        """
+        Aplica filtro pasa-banda para aislar frecuencias de voz (300-3400 Hz)
+        Elimina ruidos de baja frecuencia (ventiladores, tráfico) y alta (silbidos, electrónica)
+        """
+        if not self.use_bandpass:
+            return audio_array
+        
+        try:
+            # Aplicar filtro con estado para continuidad entre chunks
+            filtered, self.zi = scipy_signal.sosfilt(self.sos, audio_array, zi=self.zi)
+            return filtered
+        except Exception as e:
+            print(f"[AUDIO] ⚠️ Error en filtro pasa-banda: {e}")
+            return audio_array
+    
     def process_input(self, audio_data):
         """
         Pipeline completo de procesamiento de entrada (micrófono)
         1. Calibrar ruido (primeras muestras)
-        2. Noise gate
-        3. AGC
-        4. Anti-clipping
+        2. Filtro pasa-banda (aislar frecuencias de voz)
+        3. Noise gate
+        4. Pre-énfasis
+        5. AGC
+        6. Anti-clipping
         """
         # Calibración inicial
         if self.noise_floor is None:
@@ -208,19 +257,29 @@ class AudioEnhancer:
             if self.noise_floor is None:
                 return audio_data  # Aún calibrando
         
-        # 1. Noise gate (eliminar ruido de fondo)
+        # Convertir a array para procesamiento
+        audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
+        
+        # 1. Filtro pasa-banda (eliminar frecuencias no-vocales)
+        if self.use_bandpass:
+            audio_array = self.apply_bandpass_filter(audio_array)
+        
+        # Convertir de vuelta a bytes para noise gate
+        audio_data = audio_array.astype(np.int16).tobytes()
+        
+        # 2. Noise gate (eliminar ruido de fondo)
         audio_data = self.apply_noise_gate(audio_data)
         
-        # 2. Pre-énfasis (realzar frecuencias de voz)
+        # 3. Pre-énfasis (realzar frecuencias de voz)
         audio_array = self.apply_pre_emphasis(audio_data)
         
-        # 3. AGC (normalizar volumen)
+        # 4. AGC (normalizar volumen)
         audio_array = self.apply_agc(audio_array.astype(np.int16).tobytes())
         
-        # 4. Anti-clipping (prevenir distorsión)
+        # 5. Anti-clipping (prevenir distorsión)
         audio_array = self.apply_anti_clipping(audio_array)
         
-        # 5. Smoothing
+        # 6. Smoothing
         audio_array = self.smooth_output(audio_array)
         
         return audio_array.astype(np.int16).tobytes()
@@ -273,6 +332,13 @@ class AudioEnhancer:
         self.last_output_level = 0
         self.noise_floor = None
         self.noise_samples.clear()
+        
+        # Resetear filtro pasa-banda
+        if self.use_bandpass:
+            try:
+                self.zi = scipy_signal.sosfilt_zi(self.sos)
+            except:
+                pass
         
         # Limpiar buffer
         self.clear_playback_buffer()

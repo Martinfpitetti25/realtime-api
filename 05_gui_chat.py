@@ -1042,13 +1042,14 @@ class RealtimeGUIChat:
             session_config["session"].update({
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
-                    "model": "whisper-1"
+                    "model": "whisper-1",
+                    "language": "es"  # ⭐ FORZAR ESPAÑOL para transcripción correcta
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.4,       # Balance bueno entre sensibilidad y precisión
-                    "prefix_padding_ms": 500, # Contexto completo
-                    "silence_duration_ms": 800  # 0.8s - evita responder muy rápido
+                    "threshold": 0.5,       # Más alto = más preciso, menos falsos positivos
+                    "prefix_padding_ms": 300, # Menos padding = menos ruido previo
+                    "silence_duration_ms": 700  # Más corto = respuesta más rápida
                 }
             })
         
@@ -1383,7 +1384,11 @@ class RealtimeGUIChat:
             
             print(f"🎤 Micrófono activado ({self.hw_rate} Hz)")
             if self.audio_enhancer:
-                print("[AUDIO] Procesamiento: AGC + Noise Gate + Anti-clipping")
+                print("[AUDIO] ✅ Procesamiento activo: Filtro 200-4000Hz + Noise Gate + AGC + Anti-clipping")
+                print("[AUDIO] 🇪🇸 Transcripción configurada en ESPAÑOL")
+            
+            # Contador para logging de debug (no saturar consola)
+            audio_chunk_counter = 0
             
             while self.recording:
                 try:
@@ -1413,9 +1418,18 @@ class RealtimeGUIChat:
                     
                     if self.connected:
                         self.send_audio_chunk(data)
-                        # Debug: mostrar que se está enviando audio
-                        if volume_percent > 5:
-                            print(f"[MIC] Enviando audio: {volume_percent:.1f}% volumen")
+                        
+                        # Debug cada 50 chunks (aprox. 1 segundo)
+                        audio_chunk_counter += 1
+                        if audio_chunk_counter % 50 == 0 and volume_percent > 5:
+                            # Calcular RMS del audio procesado
+                            processed_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
+                            processed_rms = np.sqrt(np.mean(processed_audio ** 2))
+                            print(f"[AUDIO] 📊 Volumen: {volume_percent:.1f}% | RMS procesado: {processed_rms:.0f} | Enviando a Whisper")
+                            
+                            if self.audio_enhancer:
+                                stats = self.audio_enhancer.get_stats()
+                                print(f"[AUDIO] 🎛️ Ganancia: {stats['current_gain']} | Gate: {stats['gate_state']} | Ruido: {stats['noise_floor']}")
                 except Exception as e:
                     if self.recording:
                         print(f"Error audio: {e}")
