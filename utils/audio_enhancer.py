@@ -23,11 +23,11 @@ class AudioEnhancer:
         self.sample_rate = sample_rate
         
         # AGC (Automatic Gain Control) - OPTIMIZADO para voz clara
-        self.target_rms = 5500  # Nivel RMS optimizado para Whisper
+        self.target_rms = 6000  # Nivel RMS objetivo aumentado para máxima claridad
         self.current_gain = 1.0
-        self.gain_smoothing = 0.92  # Muy suave para preservar fonemas
-        self.min_gain = 0.9  # Mínima reducción para mantener consistencia
-        self.max_gain = 5.0  # Amplificación moderada sin distorsión
+        self.gain_smoothing = 0.9  # Más suave para evitar distorsión
+        self.min_gain = 0.8  # Menos reducción para mantener claridad
+        self.max_gain = 6.0  # Amplificación controlada para voces bajas
         
         # Anti-clipping mejorado
         self.clipping_threshold = 31000  # Umbral antes del máximo (32767)
@@ -36,23 +36,23 @@ class AudioEnhancer:
         # Noise gate adaptativo - INTELIGENTE
         self.noise_floor = None
         self.noise_samples = deque(maxlen=200)  # Más muestras para mejor calibración
-        self.noise_gate_threshold = 280  # Threshold optimizado para español
-        self.gate_attack = 0.002  # 2ms - balance entre rapidez y estabilidad
-        self.gate_release = 0.150   # 150ms - mantener contexto fonético
+        self.noise_gate_threshold = 250  # Threshold más alto = menos ruido
+        self.gate_attack = 0.001  # Apertura ultra-rápida (1ms) - captura inicio de palabra
+        self.gate_release = 0.100   # Cierre más rápido (100ms) - menos ruido al final
         self.gate_state = 0.0     # 0 = cerrado, 1 = abierto
         
         # Smoothing general
         self.last_output_level = 0
         self.smoothing_factor = 0.75  # Más suave
         
-        # Pre-énfasis para frecuencias de voz (AJUSTADO)
-        self.pre_emphasis_alpha = 0.95  # Factor reducido para preservar naturalidad
+        # Pre-énfasis para frecuencias de voz (NUEVO)
+        self.pre_emphasis_alpha = 0.97  # Factor de pre-énfasis
         self.last_sample = 0
         
-        # Filtro pasa-banda para voz (200-4000 Hz) - AJUSTADO PARA ESPAÑOL
+        # Filtro pasa-banda para voz (300-3400 Hz) - NUEVO
         self.use_bandpass = True  # Activar/desactivar filtro
-        self.bandpass_low = 200   # Más bajo para capturar mejor vocales graves (español)
-        self.bandpass_high = 4000 # Más alto para capturar consonantes sibilantes (s, z, ch)
+        self.bandpass_low = 300   # Frecuencia baja (Hz)
+        self.bandpass_high = 3400 # Frecuencia alta (Hz)
         self._init_bandpass_filter()
         
         # Double buffering para playback
@@ -63,7 +63,7 @@ class AudioEnhancer:
     def _init_bandpass_filter(self):
         """Inicializa el filtro pasa-banda Butterworth"""
         try:
-            # Filtro Butterworth de orden 3 (más suave, menos distorsión de fase)
+            # Filtro Butterworth de orden 4 (balance entre efectividad y fase)
             nyquist = self.sample_rate / 2
             low = self.bandpass_low / nyquist
             high = self.bandpass_high / nyquist
@@ -73,7 +73,7 @@ class AudioEnhancer:
             high = max(0.01, min(high, 0.99))
             
             if low < high:
-                self.sos = scipy_signal.butter(3, [low, high], btype='band', output='sos')
+                self.sos = scipy_signal.butter(4, [low, high], btype='band', output='sos')
                 self.zi = scipy_signal.sosfilt_zi(self.sos)
                 print(f"[AUDIO] ✅ Filtro pasa-banda inicializado ({self.bandpass_low}-{self.bandpass_high} Hz)")
             else:
