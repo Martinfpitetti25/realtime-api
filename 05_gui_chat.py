@@ -202,6 +202,8 @@ class RealtimeGUIChat:
         self.waiting_for_wake_word = False
         self.wake_word = DEFAULT_WAKE_WORD
         self.wake_word_confirmation = WAKE_WORD_CONFIRMATION
+        self._transitioning_from_wake_word = False
+        self._wake_word_return_id = None
         
         # Configuración personalizable
         self.voice = "coral"
@@ -905,6 +907,11 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 log_ws.debug(f"Evento: {event_type}")
             
             if event_type == 'input_audio_buffer.speech_started':
+                # Cancelar auto-retorno a wake word si el usuario habla
+                if self._wake_word_return_id:
+                    self.root.after_cancel(self._wake_word_return_id)
+                    self._wake_word_return_id = None
+                
                 # INTERRUPCIÓN INTELIGENTE: Usuario empezó a hablar
                 if self.assistant_speaking:
                     log_ws.info("🚫 Usuario interrumpe al asistente")
@@ -1055,10 +1062,8 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     # Si fue interrumpido, limpiar buffers
                     self.clear_audio_buffers()
                 
-                # WAKE WORD: Si está en modo voz con wake word, volver a escuchar
-                if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled and not self.recording:
-                    log_wake.debug("Asistente terminó, volviendo a escuchar wake word...")
-                    self.root.after(500, self.start_wake_word_listening)
+                # WAKE WORD: Solo si wake_word_enabled está activo
+                # (Desactivado por defecto - se activa manualmente)
                     
             elif event_type == 'error':
                 error = data.get('error', {})
@@ -1081,6 +1086,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         self.root.after(0, lambda: self.send_button.config(state=tk.DISABLED))
         
     def on_open(self, ws):
+        self.connected = True
         self.update_session_config()
         
         # Iniciar thread de playback para reproducir audio incluso en modo texto
@@ -1169,13 +1175,9 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             self.record_button.config(state=tk.NORMAL if self.connected else tk.DISABLED)
             self.append_message("Sistema", "✓ Modo voz activado", 'system')
             
-            # WAKE WORD: Iniciar detección de wake word automáticamente
-            if self.connected and not self.recording and PORCUPINE_AVAILABLE:
-                log_wake.debug("Auto-iniciando wake word detection en 500ms...")
-                self.root.after(500, self.start_wake_word_listening)
-            elif self.connected and not self.recording:
-                # Sin Porcupine, modo normal
-                log_audio.debug("Auto-iniciando grabación (sin wake word)")
+            # Iniciar grabación directamente (modo manos libres)
+            if self.connected and not self.recording:
+                log_audio.debug("Auto-iniciando grabación en 500ms...")
                 self.root.after(500, self.start_recording)
         else:
             # Detener wake word si está activo
@@ -1249,11 +1251,6 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         self.recording = False
         self.record_button.config(text="🎤 Iniciar", bg='#e74c3c')
         self.append_message("Sistema", "⏸️ Modo manos libres detenido", 'system')
-        
-        # Si está en modo voz con wake word, volver a escuchar
-        if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled:
-            log_wake.debug("Volviendo a escuchar wake word después de detener grabación")
-            self.root.after(1000, self.start_wake_word_listening)
     
     # ========== WAKE WORD DETECTION (PORCUPINE) ==========
     
@@ -1389,21 +1386,25 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
     
     def on_wake_word_detected(self):
         """Callback cuando se detecta la wake word"""
-        log_wake.debug("Procesando detección...")
+        log_wake.info("🎯 Wake word detectada! Procesando...")
         
-        # Detener escucha de wake word
+        # Detener escucha de wake word completamente
         self.waiting_for_wake_word = False
+        self.wake_word_listening = False
+        self._transitioning_from_wake_word = True  # Evitar race condition con response.audio.done
+        
+        # Limpiar Porcupine para liberar recursos
+        self.cleanup_porcupine()
         
         # Actualizar UI
-        self.record_button.config(text="🎙️ Wake Word Detectada!", bg='#27ae60')
+        self.record_button.config(text="🎙️ Activado!", bg='#27ae60')
         self.append_message("Usuario", f"[{self.wake_word}]", 'user')
         
         # Enviar confirmación al asistente
         self.send_confirmation_message()
         
-        # Esperar un momento para que se reproduzca la confirmación
-        # Luego iniciar grabación normal
-        self.root.after(100, self.transition_to_recording)
+        # Dar tiempo al thread de wake word para cerrar el stream del mic
+        self.root.after(500, self.transition_to_recording)
     
     def send_confirmation_message(self):
         """Envía mensaje de confirmación 'Estoy aquí' al asistente"""
@@ -1437,9 +1438,26 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             self.root.after(500, self.transition_to_recording)
             return
         
-        # Iniciar grabación normal
-        log_wake.debug("Iniciando grabación de usuario...")
+        # Esperar a que el thread de wake word libere el micrófono
+        if self.wake_word_thread and self.wake_word_thread.is_alive():
+            log_wake.debug("Esperando que thread de wake word libere el mic...")
+            self.root.after(200, self.transition_to_recording)
+            return
+        
+        # Transición completada
+        self._transitioning_from_wake_word = False
+        log_wake.info("🎤 Transición completa, iniciando grabación...")
         self.start_recording()
+    
+    def _auto_return_to_wake_word(self):
+        """Vuelve automáticamente a modo wake word si no hay actividad"""
+        self._wake_word_return_id = None
+        if not self.recording or self.assistant_speaking:
+            return
+        if not self.wake_word_enabled or not self.voice_mode:
+            return
+        log_wake.info("🔄 Sin actividad, volviendo a modo wake word...")
+        self.stop_recording()
     
     # ========== FIN WAKE WORD DETECTION ==========
         
@@ -1486,37 +1504,18 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if self.hw_rate != self.api_rate:
                         data = self.resample_audio(data, self.resample_ratio_in)
                     
-                    # AEC: Cancelación de eco acústico (reemplaza hard mute)
-                    # El audio siempre se envía (procesado), permitiendo
-                    # que el usuario interrumpa naturalmente al asistente
-                    if self.echo_canceller:
-                        data = self.echo_canceller.process(data)
-                    elif self.assistant_speaking:
-                        # Fallback sin AEC: hard mute (comportamiento anterior)
-                        continue
-                    
-                    # Procesar con AudioEnhancer (AGC, noise gate, etc.)
-                    if self.audio_enhancer:
-                        data = self.audio_enhancer.process_input(data)
-                    
+                    # Enviar audio directo a la API
+                    # La API tiene su propio VAD, noise reduction (far_field) y procesamiento
+                    # No necesitamos AEC ni AudioEnhancer localmente
                     if self.connected:
                         self.send_audio_chunk(data)
                         
                         # Debug cada 50 chunks (aprox. 1 segundo)
                         audio_chunk_counter += 1
                         if audio_chunk_counter % 50 == 0 and volume_percent > 5:
-                            # Calcular RMS del audio procesado
                             processed_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                             processed_rms = np.sqrt(np.mean(processed_audio ** 2))
                             log_audio.debug(f"📊 Volumen: {volume_percent:.1f}% | RMS: {processed_rms:.0f}")
-                            
-                            if self.audio_enhancer:
-                                stats = self.audio_enhancer.get_stats()
-                                log_audio.debug(f"🎛️ Ganancia: {stats['current_gain']} | Gate: {stats['gate_state']} | Ruido: {stats['noise_floor']}")
-                            if self.echo_canceller:
-                                ec_stats = self.echo_canceller.get_stats()
-                                if ec_stats['echo_active']:
-                                    log_aec.debug(f"🔊 Echo activo | DTD: {'sí' if ec_stats['double_talk'] else 'no'} | Gate: {ec_stats['gate']*100:.0f}% | Supresión: {ec_stats['suppression_db']:.1f}dB")
                 except Exception as e:
                     if self.recording:
                         log_audio.error(f"Error audio: {e}")

@@ -37,9 +37,9 @@ class AudioEnhancer:
         self.noise_floor = None
         self.noise_samples = deque(maxlen=200)  # Más muestras para mejor calibración
         self.noise_gate_threshold = 250  # Threshold más alto = menos ruido
-        self.gate_attack = 0.001  # Apertura ultra-rápida (1ms) - captura inicio de palabra
-        self.gate_release = 0.100   # Cierre más rápido (100ms) - menos ruido al final
-        self.gate_state = 0.0     # 0 = cerrado, 1 = abierto
+        self.gate_attack = 0.8    # Apertura rápida (80% en 1 frame ~21ms)
+        self.gate_release = 0.100   # Cierre más lento (suave)
+        self.gate_state = 1.0     # Empezar abierto, la calibración lo ajustará
         
         # Smoothing general
         self.last_output_level = 0
@@ -95,7 +95,7 @@ class AudioEnhancer:
         
         if len(self.noise_samples) >= 20:  # Más muestras = mejor calibración
             # Usar percentil 30 como ruido de fondo (más robusto)
-            self.noise_floor = np.percentile(list(self.noise_samples), 30)
+            self.noise_floor = max(1.0, np.percentile(list(self.noise_samples), 30))
             
             # Calcular desviación estándar para detectar variabilidad
             noise_std = np.std(list(self.noise_samples))
@@ -328,7 +328,7 @@ class AudioEnhancer:
     def reset(self):
         """Resetea el estado del procesador"""
         self.current_gain = 1.0
-        self.gate_state = 0.0
+        self.gate_state = 1.0  # Empezar abierto para no perder primeras palabras
         self.last_output_level = 0
         self.noise_floor = None
         self.noise_samples.clear()
