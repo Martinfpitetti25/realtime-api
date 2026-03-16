@@ -17,14 +17,23 @@ from datetime import datetime
 from PIL import Image, ImageTk
 import cv2
 import numpy as np
+from utils.logger import get_logger
+
+# Loggers por subsistema
+log = get_logger('gui_chat')
+log_audio = get_logger('audio')
+log_ws = get_logger('websocket')
+log_vision = get_logger('vision')
+log_wake = get_logger('wake_word')
+log_aec = get_logger('aec')
 
 try:
     import pyaudio
     AUDIO_AVAILABLE = True
-    print("[DEBUG] PyAudio importado correctamente - AUDIO_AVAILABLE = True")
+    log_audio.debug("PyAudio importado correctamente")
 except ImportError:
     AUDIO_AVAILABLE = False
-    print("[DEBUG] PyAudio NO disponible - AUDIO_AVAILABLE = False")
+    log_audio.debug("PyAudio NO disponible")
 
 # Cámara disponible si hay OpenCV
 try:
@@ -44,22 +53,29 @@ try:
     AUDIO_ENHANCER_AVAILABLE = True
 except ImportError:
     AUDIO_ENHANCER_AVAILABLE = False
-    print("[WARNING] AudioEnhancer no disponible - audio sin procesamiento avanzado")
+    log_audio.warning("AudioEnhancer no disponible - audio sin procesamiento avanzado")
+
+try:
+    from utils.echo_canceller import EchoCanceller
+    ECHO_CANCELLER_AVAILABLE = True
+except ImportError:
+    ECHO_CANCELLER_AVAILABLE = False
+    log_aec.warning("EchoCanceller no disponible - usando mute simple para eco")
 
 try:
     from utils.audio_device_manager import AudioDeviceManager
     AUDIO_DEVICE_MANAGER_AVAILABLE = True
 except ImportError:
     AUDIO_DEVICE_MANAGER_AVAILABLE = False
-    print("[WARNING] AudioDeviceManager no disponible - usando dispositivos por defecto")
+    log_audio.warning("AudioDeviceManager no disponible - usando dispositivos por defecto")
 
 try:
     import pvporcupine
     PORCUPINE_AVAILABLE = True
-    print("[DEBUG] Porcupine importado correctamente - PORCUPINE_AVAILABLE = True")
+    log_wake.debug("Porcupine importado correctamente")
 except ImportError:
     PORCUPINE_AVAILABLE = False
-    print("[WARNING] Porcupine no disponible - wake word desactivado")
+    log_wake.warning("Porcupine no disponible - wake word desactivado")
 
 load_dotenv()
 
@@ -107,9 +123,9 @@ class RealtimeGUIChat:
         try:
             self.audio = pyaudio.PyAudio() if self.audio_available else None
             if self.audio:
-                print(f"[DEBUG] PyAudio inicializado correctamente - {self.audio.get_device_count()} dispositivos encontrados")
+                log_audio.debug(f"PyAudio inicializado - {self.audio.get_device_count()} dispositivos")
         except Exception as e:
-            print(f"[ERROR] No se pudo inicializar PyAudio: {e}")
+            log_audio.error(f"No se pudo inicializar PyAudio: {e}")
             self.audio = None
             self.audio_available = False
         
@@ -126,7 +142,12 @@ class RealtimeGUIChat:
         # Audio Enhancer profesional
         self.audio_enhancer = AudioEnhancer(sample_rate=RATE_API) if AUDIO_ENHANCER_AVAILABLE else None
         if self.audio_enhancer:
-            print("[AUDIO] ✅ Procesamiento profesional activado (AGC + Anti-clipping + Noise Gate)")
+            log_audio.info("✅ Procesamiento profesional activado (AGC + Anti-clipping + Noise Gate)")
+        
+        # Echo Canceller (AEC) - Reemplaza hard mute por cancelación inteligente
+        self.echo_canceller = EchoCanceller(sample_rate=RATE_API, frame_size=CHUNK) if ECHO_CANCELLER_AVAILABLE else None
+        if self.echo_canceller:
+            log_aec.info("✅ Cancelación de eco acústico (AEC) activada")
         
         # Audio Device Manager
         self.audio_device_manager = AudioDeviceManager() if AUDIO_DEVICE_MANAGER_AVAILABLE and self.audio_available else None
@@ -140,11 +161,11 @@ class RealtimeGUIChat:
             self.output_device_index = prefs.get("output")
             input_name, output_name = self.audio_device_manager.get_preferred_device_names()
             if input_name or output_name:
-                print(f"[AUDIO] Dispositivos preferidos cargados:")
+                log_audio.info("Dispositivos preferidos cargados:")
                 if input_name:
-                    print(f"  🎤 Input: {input_name}")
+                    log_audio.info(f"  🎤 Input: {input_name}")
                 if output_name:
-                    print(f"  🔊 Output: {output_name}")
+                    log_audio.info(f"  🔊 Output: {output_name}")
         
         # Cámara (solo captura OpenCV, sin YOLO)
         self.camera_cap = None
@@ -165,6 +186,8 @@ class RealtimeGUIChat:
         # Estado del asistente para interrupción inteligente
         self.assistant_speaking = False
         self.current_response_id = None
+        self.current_response_item_id = None  # Item ID para truncation
+        self.played_audio_bytes = 0           # Bytes reproducidos para truncation
         self.user_interrupted = False
         
         # Contador de costos GPT-4V
@@ -181,7 +204,7 @@ class RealtimeGUIChat:
         self.wake_word_confirmation = WAKE_WORD_CONFIRMATION
         
         # Configuración personalizable
-        self.voice = "alloy"
+        self.voice = "coral"
         self.instructions = """Eres un asistente conversacional en tiempo real. Debes responder como en una conversación hablada: de forma natural, rápida, clara y fácil de seguir.
 
 Tu prioridad es que la interacción se sienta fluida y continua. Mantén el contexto de lo que se viene hablando, intenta seguir el hilo de la conversación y adapta tus respuestas si el usuario cambia de tema, pregunta algo distinto o interrumpe.
@@ -248,16 +271,16 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if 'pipewire' in name or 'default' in name:
                         if info.get('maxInputChannels', 0) > 0 and input_dev is None:
                             input_dev = i
-                            print(f"[AUDIO] Input PipeWire encontrado: [{i}] {info['name']}")
+                            log_audio.info(f"Input PipeWire encontrado: [{i}] {info['name']}")
                         if info.get('maxOutputChannels', 0) > 0 and output_dev is None:
                             output_dev = i
-                            print(f"[AUDIO] Output PipeWire encontrado: [{i}] {info['name']}")
+                            log_audio.info(f"Output PipeWire encontrado: [{i}] {info['name']}")
                 except Exception as e:
                     continue
             
             return input_dev, output_dev
         except Exception as e:
-            print(f"[ERROR] Error buscando PipeWire: {e}")
+            log_audio.error(f"Error buscando PipeWire: {e}")
             return None, None
     
     def find_supported_rate(self):
@@ -295,7 +318,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 stream = self.audio.open(**input_kwargs)
                 stream.close()
                 
-                print(f"✅ Audio rate soportado: {rate} Hz")
+                log_audio.info(f"✅ Audio rate soportado: {rate} Hz")
                 self.hw_rate = rate
                 self.resample_ratio_in = self.api_rate / self.hw_rate
                 self.resample_ratio_out = self.hw_rate / self.api_rate
@@ -303,7 +326,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             except Exception as e:
                 continue
         
-        print("❌ No se encontró rate compatible")
+        log_audio.error("No se encontró rate compatible")
         return None
     
     def resample_audio(self, audio_data, ratio):
@@ -325,10 +348,10 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             
             return resampled.tobytes()
         except ImportError:
-            print("⚠️ scipy no disponible, sin resampling")
+            log_audio.warning("scipy no disponible, sin resampling")
             return audio_data
         except Exception as e:
-            print(f"❌ Error en resampling: {e}")
+            log_audio.error(f"Error en resampling: {e}")
             return audio_data
         
     def auto_start_vision_system(self):
@@ -339,7 +362,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             
             self.append_message("Sistema", "🤖 Sistema de visión GPT-4 iniciado automáticamente", 'system')
         except Exception as e:
-            print(f"Error iniciando sistema automático: {e}")
+            log_vision.error(f"Error iniciando sistema automático: {e}")
     
     def start_camera_simple(self):
         """Inicia la cámara sin YOLO, solo captura"""
@@ -351,7 +374,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         for cam_idx in [0, 1, 2]:
             self.camera_cap = cv2.VideoCapture(cam_idx)
             if self.camera_cap.isOpened():
-                print(f"[Cámara] Abierta en índice {cam_idx}")
+                log_vision.info(f"Cámara abierta en índice {cam_idx}")
                 break
         
         if not self.camera_cap or not self.camera_cap.isOpened():
@@ -516,9 +539,9 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                             status_text = f"👁️ {vision_description[:40]}..."
                             self.root.after(0, lambda: self.camera_status.config(text=status_text, fg='#27ae60'))
                         
-                        print(f"[GPT-4V] 🔄 Background refresh: {vision_description[:50]}...")
+                        log_vision.debug(f"🔄 Background refresh: {vision_description[:50]}...")
             except Exception as e:
-                print(f"Error GPT-4V background: {e}")
+                log_vision.error(f"GPT-4V background: {e}")
             finally:
                 self.gpt4v_analyzing = False
         
@@ -879,12 +902,12 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             
             # Debug: imprimir eventos recibidos
             if event_type not in ['response.audio.delta', 'input_audio_buffer.speech_started']:
-                print(f"[DEBUG] Evento: {event_type}")
+                log_ws.debug(f"Evento: {event_type}")
             
             if event_type == 'input_audio_buffer.speech_started':
                 # INTERRUPCIÓN INTELIGENTE: Usuario empezó a hablar
                 if self.assistant_speaking:
-                    print("[INTERRUPT] 🚫 Usuario interrumpe al asistente")
+                    log_ws.info("🚫 Usuario interrumpe al asistente")
                     self.user_interrupted = True
                     self.cancel_response()
                     self.root.after(0, self.update_activity_status, 'interrupted', '#e74c3c')
@@ -905,11 +928,11 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 transcript = data.get('transcript', '')
                 if transcript:
                     self.root.after(0, self.append_message, "Tú (voz)", transcript, 'user')
-                    print(f"[Transcripción] {transcript}")
+                    log_ws.info(f"Transcripción: {transcript}")
             
             elif event_type == 'conversation.item.input_audio_transcription.failed':
                 error = data.get('error', {})
-                print(f"❌ Error transcripción: {error}")
+                log_ws.error(f"Error transcripción: {error}")
             
             elif event_type == 'session.created':
                 self.connected = True
@@ -920,18 +943,18 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 self.root.after(0, self.append_message, "Sistema", "✓ Conectado. Escribe o usa voz!", 'system')
                 
             elif event_type == 'session.updated':
-                print("[DEBUG] Sesión actualizada")
+                log_ws.debug("Sesión actualizada")
                 
             elif event_type == 'response.text.delta':
                 text = data.get('delta', '')
                 if not hasattr(self, 'current_response'):
                     self.current_response = ""
                 self.current_response += text
-                print(f"[DEBUG] Text delta: {text}")
+                log_ws.debug(f"Text delta: {text}")
                 
             elif event_type == 'response.text.done':
                 if hasattr(self, 'current_response') and self.current_response:
-                    print(f"[DEBUG] Text done: {self.current_response}")
+                    log_ws.debug(f"Text done: {self.current_response}")
                     self.root.after(0, self.append_message, "Asistente", self.current_response, 'assistant')
                     delattr(self, 'current_response')
                     
@@ -945,7 +968,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     self.input_tokens += usage.get('input_tokens', 0)
                     self.output_tokens += usage.get('output_tokens', 0)
                     self.root.after(0, self.update_stats)
-                    print(f"[DEBUG] Response done - Tokens: {usage}")
+                    log_ws.debug(f"Response done - Tokens: {usage}")
                 
                 # Si es respuesta de texto (no audio) extraer y mostrar
                 output = response_data.get('output', [])
@@ -957,7 +980,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                                 if c.get('type') == 'text':
                                     text = c.get('text', '')
                                     if text:
-                                        print(f"[TEXTO] Respuesta: {text}")
+                                        log_ws.debug(f"Respuesta texto: {text[:80]}")
                                         self.root.after(0, self.append_message, "Asistente", text, 'assistant')
                 
             elif event_type == 'response.audio_transcript.delta':
@@ -968,11 +991,14 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         self.current_audio_transcript = ""
                         # INTERRUPCIÓN: Asistente empezó a responder
                         self.assistant_speaking = True
+                        self.current_response_item_id = data.get('item_id')
+                        self.played_audio_bytes = 0  # Reset para nuevo turno
                         self.root.after(0, self.update_activity_status, 'speaking', '#9b59b6')
-                        print("[ASSISTANT] 🗣️ Asistente empezó a hablar")
+                        log_ws.info("🗣️ Asistente empezando a hablar")
                     self.current_audio_transcript += delta
                     # Simular volumen del asistente
                     self.set_volume_level(70)
+                    # Streaming output (se mantiene print para flush parcial)
                     print(delta, end='', flush=True)
                 
             elif event_type == 'response.audio_transcript.done':
@@ -982,27 +1008,30 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     transcript = self.current_audio_transcript
                     delattr(self, 'current_audio_transcript')
                 
-                # INTERRUPCIÓN: Asistente terminó de hablar
-                # Mantener el micrófono mutado 1 segundo para evitar captar eco
-                def unmute_mic():
-                    time.sleep(1.0)  # Esperar eco del parlante
-                    self.assistant_speaking = False
-                    print("[MIC] ✅ Micrófono reactivado")
-                
-                threading.Thread(target=unmute_mic, daemon=True).start()
+                # Asistente terminó de hablar
+                # AEC maneja el eco residual automáticamente (echo tail)
+                self.assistant_speaking = False
+                if self.echo_canceller:
+                    self.echo_canceller.notify_playback_stopped()
+                    log_aec.debug("Micrófono reactivado (AEC maneja eco residual)")
+                else:
+                    log_audio.debug("Micrófono reactivado")
                 self.root.after(0, self.update_activity_status, 'idle', '#95a5a6')
                 self.set_volume_level(0)
-                print("[ASSISTANT] ✅ Asistente terminó de hablar")
+                log_ws.info("✅ Asistente terminó de hablar")
                 
                 if transcript and not self.user_interrupted:
-                    print()  # Nueva línea
+                    print()  # Nueva línea tras streaming
                     self.root.after(0, self.append_message, "Asistente (voz)", transcript, 'assistant')
-                    print(f"[Asistente] {transcript}")
+                    log_ws.info(f"Asistente: {transcript}")
                     
             elif event_type == 'response.audio.delta':
                 audio_b64 = data.get('delta', '')
                 if audio_b64 and not self.user_interrupted:
                     audio_bytes = base64.b64decode(audio_b64)
+                    # Capturar item_id para truncation en interrupciones
+                    if not self.current_response_item_id:
+                        self.current_response_item_id = data.get('item_id')
                     # Usar buffer del enhancer si está disponible para double buffering
                     if self.audio_enhancer:
                         self.audio_enhancer.add_to_playback_buffer(audio_bytes)
@@ -1010,8 +1039,12 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         self.output_queue.put(audio_bytes)
                     
             elif event_type == 'response.audio.done':
-                # INTERRUPCIÓN: Respuesta de audio completa
+                # Respuesta de audio completa
                 self.assistant_speaking = False
+                self.current_response_item_id = None
+                self.played_audio_bytes = 0
+                if self.echo_canceller:
+                    self.echo_canceller.notify_playback_stopped()
                 
                 if not self.user_interrupted:
                     if self.audio_enhancer:
@@ -1024,17 +1057,17 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 
                 # WAKE WORD: Si está en modo voz con wake word, volver a escuchar
                 if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled and not self.recording:
-                    print("[WAKE WORD] Asistente terminó de hablar, volviendo a escuchar wake word...")
+                    log_wake.debug("Asistente terminó, volviendo a escuchar wake word...")
                     self.root.after(500, self.start_wake_word_listening)
                     
             elif event_type == 'error':
                 error = data.get('error', {})
                 error_msg = error.get('message', 'Error desconocido')
                 self.root.after(0, self.append_message, "Error", error_msg, 'system')
-                print(f"[ERROR] {error}")
+                log_ws.error(f"{error}")
                 
         except Exception as e:
-            print(f"Error procesando mensaje: {e}")
+            log_ws.error(f"Error procesando mensaje: {e}")
             import traceback
             traceback.print_exc()
             
@@ -1055,7 +1088,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             self.playback_thread = threading.Thread(target=self.play_audio, daemon=True)
             self.playback_thread.start()
             self.playback_thread_started = True
-            print("[DEBUG] Thread de playback iniciado para modo texto")
+            log_audio.debug("Thread de playback iniciado")
         
     def update_session_config(self):
         # SIEMPRE usar audio para que las respuestas se reproduzcan en el parlante
@@ -1083,10 +1116,13 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     "language": "es"  # ⭐ FORZAR ESPAÑOL para transcripción correcta
                 },
                 "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.5,       # Más alto = más preciso, menos falsos positivos
-                    "prefix_padding_ms": 300, # Menos padding = menos ruido previo
-                    "silence_duration_ms": 700  # Más corto = respuesta más rápida
+                    "type": "semantic_vad",
+                    "eagerness": "medium",       # low/medium/high — cuánto espera al usuario
+                    "create_response": True,
+                    "interrupt_response": True
+                },
+                "input_audio_noise_reduction": {
+                    "type": "far_field"  # far_field: robot/laptop con mic separado del speaker
                 }
             })
         
@@ -1116,13 +1152,13 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         ws_thread.start()
         
     def toggle_voice_mode(self):
-        print(f"[DEBUG] toggle_voice_mode llamado - audio_available: {self.audio_available}, voice_mode actual: {self.voice_mode}")
+        log.debug(f"toggle_voice_mode llamado - audio_available: {self.audio_available}, voice_mode actual: {self.voice_mode}")
         if not self.audio_available:
-            print("[DEBUG] Audio no disponible, retornando")
+            log_audio.debug("Audio no disponible, retornando")
             return
             
         self.voice_mode = not self.voice_mode
-        print(f"[DEBUG] voice_mode cambiado a: {self.voice_mode}")
+        log.debug(f"voice_mode cambiado a: {self.voice_mode}")
         
         if self.voice_mode:
             self.mode_label.config(text="Modo: Voz 🎤", fg='#e74c3c')
@@ -1135,11 +1171,11 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             
             # WAKE WORD: Iniciar detección de wake word automáticamente
             if self.connected and not self.recording and PORCUPINE_AVAILABLE:
-                print("[DEBUG] Auto-iniciando wake word detection en 500ms...")
+                log_wake.debug("Auto-iniciando wake word detection en 500ms...")
                 self.root.after(500, self.start_wake_word_listening)
             elif self.connected and not self.recording:
                 # Sin Porcupine, modo normal
-                print("[DEBUG] Auto-iniciando grabación en 500ms (sin wake word)...")
+                log_audio.debug("Auto-iniciando grabación (sin wake word)")
                 self.root.after(500, self.start_recording)
         else:
             # Detener wake word si está activo
@@ -1160,26 +1196,30 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         self.update_session_config()
         
     def toggle_recording(self):
-        print(f"[DEBUG] toggle_recording llamado - recording: {self.recording}")
+        log_audio.debug(f"toggle_recording llamado - recording: {self.recording}")
         if not self.recording:
             self.start_recording()
         else:
             self.stop_recording()
             
     def start_recording(self):
-        print("[DEBUG] start_recording llamado")
+        log_audio.debug("start_recording llamado")
         # Detectar rate soportado
         if self.find_supported_rate() is None:
-            print("[ERROR] No se pudo encontrar rate soportado")
+            log_audio.error("No se pudo encontrar rate soportado")
             self.append_message("Sistema", "❌ No se pudo inicializar audio", 'system')
             return
         
-        print(f"[DEBUG] Rate detectado: {self.hw_rate} Hz")
+        log_audio.debug(f"Rate detectado: {self.hw_rate} Hz")
         
         # Resetear audio enhancer para nueva sesión
         if self.audio_enhancer:
             self.audio_enhancer.reset()
-            print("[AUDIO] AudioEnhancer reseteado para nueva sesión")
+            log_audio.debug("AudioEnhancer reseteado")
+        
+        # Resetear echo canceller
+        if self.echo_canceller:
+            self.echo_canceller.reset()
         
         self.recording = True
         self.record_button.config(text="⏹️ Detener", bg='#27ae60')
@@ -1188,6 +1228,8 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         features = []
         if self.audio_enhancer:
             features = ["VAD Automático", "AGC", "Noise Gate"]
+        if self.echo_canceller:
+            features.append("AEC")
             features_str = " + ".join(features)
             self.append_message("Sistema", f"🎤 Modo manos libres activado | {features_str}", 'system')
             self.append_message("Sistema", "� Calibrando ruido ambiente... (permanece en silencio 2 segundos)", 'system')
@@ -1195,13 +1237,13 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         else:
             self.append_message("Sistema", f"🎤 Modo manos libres activado", 'system')
         
-        print("[DEBUG] Iniciando threads de audio...")
+        log_audio.debug("Iniciando threads de audio...")
         self.audio_thread = threading.Thread(target=self.record_audio, daemon=True)
         self.audio_thread.start()
         
         # No iniciar playback thread aquí porque ya se inicia en on_open
         # para permitir reproducción en modo texto también
-        print("[DEBUG] Thread de grabación iniciado")
+        log_audio.debug("Thread de grabación iniciado")
         
     def stop_recording(self):
         self.recording = False
@@ -1210,7 +1252,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         
         # Si está en modo voz con wake word, volver a escuchar
         if self.voice_mode and PORCUPINE_AVAILABLE and self.wake_word_enabled:
-            print("[DEBUG] Volviendo a escuchar wake word después de detener grabación...")
+            log_wake.debug("Volviendo a escuchar wake word después de detener grabación")
             self.root.after(1000, self.start_wake_word_listening)
     
     # ========== WAKE WORD DETECTION (PORCUPINE) ==========
@@ -1218,27 +1260,27 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
     def init_porcupine(self):
         """Inicializa Porcupine para detección de wake word"""
         if not PORCUPINE_AVAILABLE or not self.audio_available:
-            print("[WAKE WORD] Porcupine no disponible")
+            log_wake.warning("Porcupine no disponible")
             return False
         
         if not PORCUPINE_ACCESS_KEY:
-            print("[WAKE WORD] ⚠️ Necesitas configurar PORCUPINE_ACCESS_KEY en .env")
-            print("[WAKE WORD] Obtén tu access key gratis en: https://console.picovoice.ai/")
+            log_wake.warning("Necesitas configurar PORCUPINE_ACCESS_KEY en .env")
+            log_wake.info("Obtén tu access key gratis en: https://console.picovoice.ai/")
             self.append_message("Sistema", "⚠️ Wake word requiere PORCUPINE_ACCESS_KEY en .env", 'system')
             self.append_message("Sistema", "Obtén tu key gratis en: https://console.picovoice.ai/", 'system')
             return False
         
         try:
-            print(f"[WAKE WORD] Intentando inicializar con wake word: '{self.wake_word}'")
+            log_wake.debug(f"Intentando inicializar con wake word: '{self.wake_word}'")
             self.porcupine = pvporcupine.create(
                 access_key=PORCUPINE_ACCESS_KEY,
                 keywords=[self.wake_word]
             )
-            print(f"[WAKE WORD] ✅ Porcupine inicializado - Escuchando: '{self.wake_word}'")
+            log_wake.info(f"✅ Porcupine inicializado - Escuchando: '{self.wake_word}'")
             return True
         except Exception as e:
             error_msg = str(e)
-            print(f"[WAKE WORD] ❌ Error inicializando Porcupine: {error_msg}")
+            log_wake.error(f"Error inicializando Porcupine: {error_msg}")
             
             # Mensajes específicos según el error
             if "invalid" in error_msg.lower() or "authentication" in error_msg.lower():
@@ -1259,9 +1301,9 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             try:
                 self.porcupine.delete()
                 self.porcupine = None
-                print("[WAKE WORD] Porcupine limpiado")
+                log_wake.debug("Porcupine limpiado")
             except Exception as e:
-                print(f"[WAKE WORD] Error limpiando Porcupine: {e}")
+                log_wake.error(f"Error limpiando Porcupine: {e}")
     
     def start_wake_word_listening(self):
         """Inicia el thread de escucha de wake word"""
@@ -1298,7 +1340,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         try:
             # Detectar rate soportado
             if self.find_supported_rate() is None:
-                print("[WAKE WORD] No se pudo encontrar rate soportado")
+                log_wake.error("No se pudo encontrar rate soportado")
                 return
             
             # Porcupine requiere 16kHz
@@ -1318,7 +1360,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 stream_kwargs['input_device_index'] = self.input_device_index
             
             stream = self.audio.open(**stream_kwargs)
-            print(f"[WAKE WORD] 👂 Escuchando wake word... ({porcupine_rate} Hz)")
+            log_wake.info(f"👂 Escuchando wake word... ({porcupine_rate} Hz)")
             
             while self.wake_word_listening and self.waiting_for_wake_word:
                 try:
@@ -1328,26 +1370,26 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     keyword_index = self.porcupine.process(pcm)
                     
                     if keyword_index >= 0:
-                        print(f"[WAKE WORD] ✅ Wake word '{self.wake_word}' detectada!")
+                        log_wake.info(f"✅ Wake word '{self.wake_word}' detectada!")
                         self.root.after(0, self.on_wake_word_detected)
                         break  # Salir del loop de escucha
                     
                 except Exception as e:
                     if self.wake_word_listening:
-                        print(f"[WAKE WORD] Error: {e}")
+                        log_wake.error(f"Error: {e}")
                     break
             
             stream.stop_stream()
             stream.close()
-            print("[WAKE WORD] 👂 Detenido")
+            log_wake.debug("Escucha detenida")
             
         except Exception as e:
-            print(f"[WAKE WORD] ❌ Error en thread: {e}")
+            log_wake.error(f"Error en thread: {e}")
             self.root.after(0, self.append_message, "Error", f"Wake word: {e}", 'system')
     
     def on_wake_word_detected(self):
         """Callback cuando se detecta la wake word"""
-        print("[WAKE WORD] Procesando detección...")
+        log_wake.debug("Procesando detección...")
         
         # Detener escucha de wake word
         self.waiting_for_wake_word = False
@@ -1385,18 +1427,18 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             response_event = {"type": "response.create"}
             self.ws.send(json.dumps(response_event))
             
-            print(f"[WAKE WORD] Enviando confirmación: '{self.wake_word_confirmation}'")
+            log_wake.info(f"Enviando confirmación: '{self.wake_word_confirmation}'")
     
     def transition_to_recording(self):
         """Transición de wake word a grabación normal"""
         # Esperar a que termine de hablar el asistente
         if self.assistant_speaking:
-            print("[WAKE WORD] Esperando que termine la confirmación...")
+            log_wake.debug("Esperando que termine la confirmación...")
             self.root.after(500, self.transition_to_recording)
             return
         
         # Iniciar grabación normal
-        print("[WAKE WORD] Iniciando grabación de usuario...")
+        log_wake.debug("Iniciando grabación de usuario...")
         self.start_recording()
     
     # ========== FIN WAKE WORD DETECTION ==========
@@ -1415,14 +1457,14 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             # Usar dispositivo preferido si está configurado
             if self.input_device_index is not None:
                 stream_kwargs['input_device_index'] = self.input_device_index
-                print(f"[AUDIO] Usando dispositivo de entrada: {self.input_device_index}")
+                log_audio.debug(f"Usando dispositivo de entrada: {self.input_device_index}")
             
             stream = self.audio.open(**stream_kwargs)
             
-            print(f"🎤 Micrófono activado ({self.hw_rate} Hz)")
+            log_audio.info(f"🎤 Micrófono activado ({self.hw_rate} Hz)")
             if self.audio_enhancer:
-                print("[AUDIO] ✅ Procesamiento activo: Filtro 200-4000Hz + Noise Gate + AGC + Anti-clipping")
-                print("[AUDIO] 🇪🇸 Transcripción configurada en ESPAÑOL")
+                log_audio.info("✅ Procesamiento activo: Filtro 300-3400Hz + Noise Gate + AGC + Anti-clipping")
+                log_audio.info("🇪🇸 Transcripción configurada en ESPAÑOL")
             
             # Contador para logging de debug (no saturar consola)
             audio_chunk_counter = 0
@@ -1440,14 +1482,18 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if volume_percent > 1:  # Solo actualizar si hay sonido
                         self.root.after(0, self.set_volume_level, volume_percent)
                     
-                    # CANCELACIÓN DE ECO: No enviar audio si el asistente está hablando
-                    # Esto evita feedback y que el micrófono capte el sonido del parlante
-                    if self.assistant_speaking:
-                        continue  # Descartar este chunk, el asistente está hablando
-                    
                     # Resample a API rate (24000 Hz)
                     if self.hw_rate != self.api_rate:
                         data = self.resample_audio(data, self.resample_ratio_in)
+                    
+                    # AEC: Cancelación de eco acústico (reemplaza hard mute)
+                    # El audio siempre se envía (procesado), permitiendo
+                    # que el usuario interrumpa naturalmente al asistente
+                    if self.echo_canceller:
+                        data = self.echo_canceller.process(data)
+                    elif self.assistant_speaking:
+                        # Fallback sin AEC: hard mute (comportamiento anterior)
+                        continue
                     
                     # Procesar con AudioEnhancer (AGC, noise gate, etc.)
                     if self.audio_enhancer:
@@ -1462,14 +1508,18 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                             # Calcular RMS del audio procesado
                             processed_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                             processed_rms = np.sqrt(np.mean(processed_audio ** 2))
-                            print(f"[AUDIO] 📊 Volumen: {volume_percent:.1f}% | RMS procesado: {processed_rms:.0f} | Enviando a Whisper")
+                            log_audio.debug(f"📊 Volumen: {volume_percent:.1f}% | RMS: {processed_rms:.0f}")
                             
                             if self.audio_enhancer:
                                 stats = self.audio_enhancer.get_stats()
-                                print(f"[AUDIO] 🎛️ Ganancia: {stats['current_gain']} | Gate: {stats['gate_state']} | Ruido: {stats['noise_floor']}")
+                                log_audio.debug(f"🎛️ Ganancia: {stats['current_gain']} | Gate: {stats['gate_state']} | Ruido: {stats['noise_floor']}")
+                            if self.echo_canceller:
+                                ec_stats = self.echo_canceller.get_stats()
+                                if ec_stats['echo_active']:
+                                    log_aec.debug(f"🔊 Echo activo | DTD: {'sí' if ec_stats['double_talk'] else 'no'} | Gate: {ec_stats['gate']*100:.0f}% | Supresión: {ec_stats['suppression_db']:.1f}dB")
                 except Exception as e:
                     if self.recording:
-                        print(f"Error audio: {e}")
+                        log_audio.error(f"Error audio: {e}")
                     break
                     
         except Exception as e:
@@ -1478,13 +1528,14 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             if 'stream' in locals():
                 stream.stop_stream()
                 stream.close()
-                print("🎤 Micrófono detenido")
+                log_audio.info("🎤 Micrófono detenido")
                 
     def play_audio(self):
         """Reproduce audio del asistente con procesamiento profesional"""
         try:
-            # Usar 24kHz directamente (rate de la API) - compatible con todos los dispositivos
+            # Intentar 24kHz primero (rate nativo de la API), fallback a hw_rate
             playback_rate = self.api_rate
+            needs_resample = False
             
             # Preparar kwargs con dispositivo si está configurado
             stream_kwargs = {
@@ -1498,13 +1549,21 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             # Usar dispositivo preferido si está configurado
             if self.output_device_index is not None:
                 stream_kwargs['output_device_index'] = self.output_device_index
-                print(f"[AUDIO] Usando dispositivo de salida: {self.output_device_index}")
+                log_audio.debug(f"Usando dispositivo de salida: {self.output_device_index}")
             
-            stream = self.audio.open(**stream_kwargs)
+            try:
+                stream = self.audio.open(**stream_kwargs)
+            except Exception as e_24k:
+                # 24kHz no soportado, fallback a hardware rate (48kHz típico)
+                log_audio.warning(f"24kHz no soportado ({e_24k}), usando {self.hw_rate} Hz con resampling")
+                playback_rate = self.hw_rate
+                needs_resample = True
+                stream_kwargs['rate'] = playback_rate
+                stream = self.audio.open(**stream_kwargs)
             
-            print(f"🔊 Altavoz activado ({playback_rate} Hz)")
+            log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz)")
             if self.audio_enhancer:
-                print("[AUDIO] Playback: Double buffering + Anti-clipping")
+                log_audio.debug("Playback: Double buffering + Anti-clipping")
             
             # Reproducir mientras esté conectado (no solo mientras graba)
             # Esto permite reproducir respuestas en modo texto también
@@ -1514,39 +1573,47 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if self.audio_enhancer:
                         audio_chunk = self.audio_enhancer.get_from_playback_buffer(timeout=0.1)
                         if audio_chunk is None:
-                            # None indica fin de mensaje, pero seguir esperando nuevos mensajes
-                            print("[DEBUG] Fin de mensaje de audio, esperando siguiente...")
+                            log_audio.debug("Fin de mensaje de audio")
                             continue
                         if audio_chunk == b'':
                             continue
                     else:
                         audio_chunk = self.output_queue.get(timeout=0.1)
                         if audio_chunk is None:
-                            # None indica fin de mensaje, pero seguir esperando nuevos mensajes
-                            print("[DEBUG] Fin de mensaje de audio, esperando siguiente...")
+                            log_audio.debug("Fin de mensaje de audio")
                             continue
                     
                     # Chequear interrupción antes de reproducir
                     if self.user_interrupted:
-                        print("[DEBUG] Reproducción interrumpida por usuario")
+                        log_audio.debug("Reproducción interrumpida")
                         continue
                     
-                    # El audio ya viene en 24kHz de la API, reproducir directamente sin resample
+                    # AEC: Alimentar referencia ANTES de reproducir
+                    # El echo canceller necesita saber qué sale por el altavoz
+                    if self.echo_canceller:
+                        self.echo_canceller.feed_reference(audio_chunk)
+                    
+                    # Resamplear si el hardware no soporta 24kHz
+                    if needs_resample:
+                        audio_chunk = self.resample_audio(audio_chunk, self.resample_ratio_out)
+                    
                     stream.write(audio_chunk)
+                    self.played_audio_bytes += len(audio_chunk)
                 except queue.Empty:
                     continue
                 except Exception as e:
                     if self.connected:
-                        print(f"Error play: {e}")
+                        log_audio.error(f"Error play: {e}")
                     break
                     
             stream.stop_stream()
             stream.close()
-            print("🔊 Altavoz detenido")
+            log_audio.info("🔊 Altavoz detenido")
             
         except Exception as e:
-            print(f"❌ Error iniciando altavoz: {e}")
-            print("⚠️  Modo solo entrada (micrófono)")
+            log_audio.error(f"Error iniciando altavoz: {e}")
+            log_audio.warning("Modo solo entrada (micrófono)")
+            self.root.after(0, self.append_message, "Error", f"Altavoz: {e}", 'system')
             # Vaciar cola aunque no haya output
             while self.connected:
                 try:
@@ -1556,29 +1623,29 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         self.output_queue.get(timeout=0.1)
                 except:
                     pass
-                    
-        except Exception as e:
-            self.root.after(0, self.append_message, "Error", f"Altavoz: {e}", 'system')
         finally:
             if 'stream' in locals():
-                stream.stop_stream()
-                stream.close()
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
                 
     def send_audio_chunk(self, audio_bytes):
         if not self.connected:
-            print("[DEBUG] send_audio_chunk: No conectado")
+            log_audio.debug("send_audio_chunk: No conectado")
             return
         if not self.voice_mode:
-            print("[DEBUG] send_audio_chunk: voice_mode es False")
+            log_audio.debug("send_audio_chunk: voice_mode es False")
             return
         
         # Log cada 500 chunks para verificar que se está enviando
         if not hasattr(self, '_audio_chunk_count'):
             self._audio_chunk_count = 0
-            print("[DEBUG] Iniciando contador de chunks de audio")
+            log_audio.debug("Iniciando contador de chunks")
         self._audio_chunk_count += 1
         if self._audio_chunk_count % 500 == 0:
-            print(f"[AUDIO] ✓ {self._audio_chunk_count} chunks enviados")
+            log_audio.debug(f"✓ {self._audio_chunk_count} chunks enviados")
             
         audio_b64 = base64.b64encode(audio_bytes).decode('utf-8')
         event = {
@@ -1598,20 +1665,28 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 "type": "response.cancel"
             }
             self.ws.send(json.dumps(cancel_event))
-            print("[INTERRUPT] 📨 Cancelación enviada a API")
+            log_ws.info("📨 Cancelación enviada a API")
             
-            # Limpiar buffer de entrada de audio (nuevo audio del usuario)
-            clear_event = {
-                "type": "input_audio_buffer.clear"
-            }
-            self.ws.send(json.dumps(clear_event))
-            print("[INTERRUPT] 🧹 Buffer de entrada limpiado")
+            # Truncar audio no reproducido para sincronizar contexto del modelo
+            # Sin truncate, el modelo cree que el usuario escuchó TODA la respuesta
+            if self.current_response_item_id:
+                audio_end_ms = int(self.played_audio_bytes / (2 * self.api_rate) * 1000)
+                truncate_event = {
+                    "type": "conversation.item.truncate",
+                    "item_id": self.current_response_item_id,
+                    "content_index": 0,
+                    "audio_end_ms": audio_end_ms
+                }
+                self.ws.send(json.dumps(truncate_event))
+                log_ws.info(f"✂️ Audio truncado a {audio_end_ms}ms")
+            
+            # NO limpiar input_audio_buffer — contiene la voz nueva del usuario
             
             # Limpiar buffers de audio de salida
             self.clear_audio_buffers()
             
         except Exception as e:
-            print(f"[ERROR] Error cancelando respuesta: {e}")
+            log_ws.error(f"Error cancelando respuesta: {e}")
     
     def clear_audio_buffers(self):
         """Limpia todos los buffers de audio pendientes"""
@@ -1627,10 +1702,10 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             if self.audio_enhancer:
                 self.audio_enhancer.clear_playback_buffer()
             
-            print("[INTERRUPT] 🗑️ Buffers de audio limpiados")
+            log_audio.debug("🗑️ Buffers de audio limpiados")
             
         except Exception as e:
-            print(f"[ERROR] Error limpiando buffers: {e}")
+            log_audio.error(f"Error limpiando buffers: {e}")
         
     def send_message(self):
         message = self.message_entry.get('1.0', tk.END).strip()
@@ -1653,9 +1728,9 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 vision_description = self.last_gpt4v_description
                 full_message = f"Contexto visual actual: {vision_description}\n\nPregunta del usuario: {message}"
                 display_message = f"{message} 👁️"
-                print(f"[GPT-4V] 💾 Cache usado ({cache_age:.1f}s): {vision_description[:50]}...")
+                log_vision.debug(f"💾 Cache usado ({cache_age:.1f}s): {vision_description[:50]}...")
             else:
-                print(f"[GPT-4V] 🔄 Generando análisis fresco...")
+                log_vision.debug("Generando análisis fresco...")
                 
                 ret, frame = self.read_camera_frame()
                 if ret and frame is not None:
@@ -1685,14 +1760,14 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         # Actualizar stats en UI
                         self.update_stats()
                         
-                        print(f"[GPT-4V] ✅ ${cost:.4f} | Total: ${self.gpt4v_total_cost:.3f} ({self.gpt4v_analyses_count} análisis)")
+                        log_vision.info(f"✅ ${cost:.4f} | Total: ${self.gpt4v_total_cost:.3f} ({self.gpt4v_analyses_count} análisis)")
                     else:
-                        print(f"[GPT-4V] ❌ Error en análisis")
+                        log_vision.error("Error en análisis GPT-4V")
                 else:
-                    print(f"[GPT-4V] ❌ Error capturando frame")
+                    log_vision.error("Error capturando frame")
         
         if display_message == message:
-            print(f"[DEBUG] Enviando sin visión")
+            log_ws.debug("Enviando sin visión")
         
         self.append_message("Tú", display_message, 'user')
         self.message_entry.delete('1.0', tk.END)
@@ -1714,7 +1789,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             }
         }
         
-        print(f"[DEBUG] Enviando mensaje de texto con audio habilitado: {full_message[:100]}...")
+        log_ws.debug(f"Enviando mensaje texto+audio: {full_message[:80]}...")
         self.ws.send(json.dumps(message_event))
         self.ws.send(json.dumps(response_event))
         
@@ -1748,12 +1823,16 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         
         voice_var = tk.StringVar(value=self.voice)
         voices = [
+            ("Coral (natural) ⭐", "coral"),
+            ("Marin (clara) ⭐", "marin"),
+            ("Cedar (cálida) ⭐", "cedar"),
             ("Alloy (neutral)", "alloy"),
             ("Echo (masculina)", "echo"),
-            ("Fable (británica)", "fable"),
-            ("Onyx (grave)", "onyx"),
-            ("Nova (femenina)", "nova"),
-            ("Shimmer (suave)", "shimmer")
+            ("Sage (serena)", "sage"),
+            ("Ash (firme)", "ash"),
+            ("Ballad (suave)", "ballad"),
+            ("Shimmer (brillante)", "shimmer"),
+            ("Verse (expresiva)", "verse")
         ]
         
         for text, value in voices:
@@ -2254,14 +2333,14 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         should_analyze = self._should_trigger_gpt4v()
                         
                         if should_analyze:
-                            print("🤖 [AUTO] Cambio detectado, activando GPT-4V...")
+                            log_vision.info("🤖 Cambio detectado, activando GPT-4V...")
                             self._auto_analyze_with_gpt4v()
                 
                 # Actualizar cada 2 segundos
                 time.sleep(2)
                 
             except Exception as e:
-                print(f"Error en vision loop: {e}")
+                log_vision.error(f"Error en vision loop: {e}")
                 time.sleep(1)
         
     def _should_trigger_gpt4v(self):
@@ -2289,7 +2368,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
             change_percentage = total_change / max_objects
             
             if change_percentage >= self.gpt4v_change_threshold:
-                print(f"🔄 Cambio significativo: {change_percentage*100:.1f}% (umbral: {self.gpt4v_change_threshold*100:.0f}%)")
+                log_vision.debug(f"🔄 Cambio significativo: {change_percentage*100:.1f}% (umbral: {self.gpt4v_change_threshold*100:.0f}%)")
                 self.previous_object_set = current_objects
                 self.last_gpt4v_time = current_time
                 return True
@@ -2298,7 +2377,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         if self.gpt4v_refresh_interval > 0:
             time_since_last = current_time - self.last_gpt4v_time
             if time_since_last >= self.gpt4v_refresh_interval:
-                print(f"⏰ Refresh automático ({self.gpt4v_refresh_interval}s transcurridos)")
+                log_vision.debug(f"⏰ Refresh automático ({self.gpt4v_refresh_interval}s transcurridos)")
                 self.previous_object_set = current_objects
                 self.last_gpt4v_time = current_time
                 return True
@@ -2317,7 +2396,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 # Obtener frame actual
                 ret, frame = self.camera_service.read_frame()
                 if not ret or frame is None:
-                    print("❌ Error capturando frame para GPT-4V")
+                    log_vision.error("Error capturando frame para GPT-4V")
                     return
                 
                 # Analizar con GPT-4V
@@ -2341,12 +2420,12 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                         status_text = f"👁️ GPT-4V: {description[:50]}..." if len(description) > 50 else f"👁️ GPT-4V: {description}"
                         self.root.after(0, lambda: self.camera_status.config(text=status_text, fg='#27ae60'))
                     
-                    print(f"✅ GPT-4V actualizado (${cost:.4f}): {description[:60]}...")
+                    log_vision.info(f"GPT-4V actualizado (${cost:.4f}): {description[:60]}...")
                 else:
-                    print(f"❌ Error en GPT-4V: {result}")
+                    log_vision.error(f"Error en GPT-4V: {result}")
                 
             except Exception as e:
-                print(f"❌ Error en análisis automático GPT-4V: {e}")
+                log_vision.error(f"Error en análisis automático GPT-4V: {e}")
             
             finally:
                 self.gpt4v_analyzing = False
@@ -2356,7 +2435,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
     
     def on_closing(self):
         """Cerrar aplicación correctamente"""
-        print("🛑 Cerrando aplicación...")
+        log.info("🛑 Cerrando aplicación...")
         
         self.recording = False
         
@@ -2383,7 +2462,7 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         
         # Destruir ventana
         self.root.destroy()
-        print("✅ Aplicación cerrada")
+        log.info("✅ Aplicación cerrada")
 
 def main():
     root = tk.Tk()
