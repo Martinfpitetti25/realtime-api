@@ -1504,9 +1504,15 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if self.hw_rate != self.api_rate:
                         data = self.resample_audio(data, self.resample_ratio_in)
                     
-                    # Enviar audio directo a la API
-                    # La API tiene su propio VAD, noise reduction (far_field) y procesamiento
-                    # No necesitamos AEC ni AudioEnhancer localmente
+                    # Procesamiento de audio antes de enviar a la API
+                    # 1. Echo Canceller: eliminar eco del altavoz capturado por el mic
+                    if self.echo_canceller and self.assistant_speaking:
+                        data = self.echo_canceller.process(data)
+                    
+                    # 2. AudioEnhancer: filtro pasa-banda, noise gate, AGC, anti-clipping
+                    if self.audio_enhancer:
+                        data = self.audio_enhancer.process_input(data)
+                    
                     if self.connected:
                         self.send_audio_chunk(data)
                         
