@@ -81,12 +81,14 @@ load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
-MODEL = 'gpt-realtime-mini'
+# Modelo mejorado: gpt-4o-realtime-preview (mejor inteligencia, respuestas más naturales)
+# Alternativa económica: gpt-4o-mini-realtime-preview
+MODEL = 'gpt-4o-realtime-preview'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens
-PRICE_INPUT = 0.60
-PRICE_OUTPUT = 2.40
+# Precios por 1M tokens (gpt-4o-realtime-preview)
+PRICE_INPUT = 5.00   # Input audio/text
+PRICE_OUTPUT = 20.00  # Output audio/text
 
 # Configuración de audio optimizada para máxima fluidez
 CHUNK = 512  # 21ms @ 24kHz - Balance perfecto latencia/estabilidad
