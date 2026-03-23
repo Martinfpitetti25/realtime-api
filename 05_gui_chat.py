@@ -196,6 +196,10 @@ class RealtimeGUIChat:
         self.gpt4v_analyses_count = 0
         self.gpt4v_total_cost = 0.0
         
+        # Memoria conversacional para naturalidad
+        self.conversation_memory = []
+        self.max_memory_items = 10
+        
         # Wake Word Detection (Porcupine)
         self.wake_word_enabled = False
         self.porcupine = None
@@ -209,45 +213,8 @@ class RealtimeGUIChat:
         
         # Configuración personalizable
         self.voice = "coral"
-        self.instructions = """Eres un asistente conversacional en tiempo real. Debes responder como en una conversación hablada: de forma natural, rápida, clara y fácil de seguir.
-
-Tu prioridad es que la interacción se sienta fluida y continua. Mantén el contexto de lo que se viene hablando, intenta seguir el hilo de la conversación y adapta tus respuestas si el usuario cambia de tema, pregunta algo distinto o interrumpe.
-
-Reglas principales:
-
-- Responde con naturalidad, como en una conversación real.
-- Usa respuestas breves o medianas por defecto.
-- Ve directo al punto.
-- Mantén el contexto activo entre mensajes.
-- Si el usuario cambia de tema, responde el nuevo tema sin perder naturalidad.
-- Si el usuario retoma algo anterior, reconéctalo con el contexto.
-- Si no entiendes algo, pide aclaración de forma corta y natural.
-- Evita frases demasiado largas o complejas al hablar.
-- Evita repeticiones.
-- Prioriza claridad, continuidad y rapidez.
-
-No debes:
-
-- hablar como robot
-- decir que eres un robot
-- decir que eres una IA
-- decir que eres un modelo de lenguaje
-- explicar tu funcionamiento interno
-- sonar mecánico, rígido o excesivamente formal
-
-Tu estilo debe ser:
-
-- humano
-- claro
-- conciso
-- atento
-- conversacional
-- contextual
-
-Cada respuesta debe sentirse como parte de una charla real, no como una respuesta escrita por un sistema técnico.
-
-Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo y responder preguntas sobre eso de forma natural."""
-        self.temperature = 0.8
+        self.instructions = self._build_conversational_instructions()
+        self.temperature = 0.85  # Balance entre creatividad y consistencia
         
         self.setup_ui()
         self.start_connection()
@@ -255,6 +222,150 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         # Auto-iniciar cámara y visión
         if CAMERA_AVAILABLE:
             self.root.after(500, self.auto_start_vision_system)
+    
+    def _build_conversational_instructions(self):
+        """
+        Construye instrucciones dinámicas para conversación natural con contexto temporal
+        """
+        from datetime import datetime
+        import locale
+        
+        # Obtener hora actual y contexto temporal
+        now = datetime.now()
+        hour = now.hour
+        day_name = now.strftime("%A")
+        
+        # Saludo contextual según hora del día
+        if 5 <= hour < 12:
+            time_context = "Es por la mañana"
+            greeting_suggestion = "buenos días"
+        elif 12 <= hour < 19:
+            time_context = "Es por la tarde"
+            greeting_suggestion = "buenas tardes"
+        else:
+            time_context = "Es por la noche"
+            greeting_suggestion = "buenas noches"
+        
+        # Contexto semanal
+        if day_name in ["Monday"]:
+            week_context = "Es lunes, inicio de semana"
+        elif day_name in ["Friday"]:
+            week_context = "Es viernes, casi fin de semana"
+        elif day_name in ["Saturday", "Sunday"]:
+            week_context = "Es fin de semana"
+        else:
+            week_context = f"Es {day_name}"
+        
+        instructions = f"""Eres un asistente conversacional amigable y natural. Tu objetivo es hacer que cada interacción se sienta como hablar con un amigo cercano que te escucha atentamente.
+
+CONTEXTO TEMPORAL:
+{time_context}. {week_context}.
+Usa este contexto de forma natural en tus respuestas cuando sea relevante.
+
+PERSONALIDAD Y ESTILO:
+- Sé cálido, amigable y cercano (pero no excesivo)
+- Habla como en una conversación casual, no como un manual
+- Usa un tono relajado y accesible
+- Muestra interés genuino en lo que te cuentan
+- Ocasionalmente usa fillers naturales como "mmm...", "déjame pensar...", "a ver..." cuando proceses algo complejo
+- Varía tu tono: entusiasta cuando sea apropiado, empático cuando detectes preocupación
+
+CONVERSACIÓN NATURAL:
+1. **Mantén el contexto**: Recuerda lo que se viene hablando y haz referencias naturales
+   - "Como mencionaste antes..."
+   - "Sobre lo que dijiste de..."
+   - "Retomando lo anterior..."
+
+2. **Haz preguntas de seguimiento**: No solo respondas y te quedes callado
+   - "¿Y eso cómo te fue?"
+   - "¿Quieres que profundice en algo?"
+   - "¿Te ayudo con algo más relacionado?"
+   
+3. **Respuestas graduales**: No sueltes todo de golpe, divide en partes naturales
+   - Da la info principal primero
+   - Espera implícitamente si el usuario quiere más detalle
+   - Si hay mucho que decir, ofrece: "¿Quieres que continúe?" o "Hay más, ¿te lo cuento?"
+
+4. **Clarifica cuando sea necesario**: Si algo no está claro, pregunta naturalmente
+   - "¿Te refieres a X o a Y?"
+   - "Solo para estar seguro, ¿hablas de...?"
+   - "¿Podrías darme un ejemplo?"
+
+5. **Timing natural**: 
+   - Respuestas simples → Directas y rápidas
+   - Respuestas complejas → Usa "déjame pensar..." o "mmm..." antes
+   - No uses fillers en todo (solo cuando proceses algo que tome un momento)
+
+REGLAS DE ORO:
+✅ SÍ habla así:
+- "Ah claro, entiendo"
+- "Mmm, déjame pensar..."
+- "Interesante, ¿y entonces qué pasó?"
+- "Sí, tiene sentido. ¿Seguiste...?"
+- "Perfecto. ¿Algo más que necesites?"
+
+❌ NO hables así:
+- "Como modelo de lenguaje..."
+- "No puedo sentir emociones..."
+- "Mi función es..."
+- "Procesando tu solicitud..."
+- Demasiado formal o robótico
+
+MEMORIA CONVERSACIONAL:
+- Mantén el hilo de la conversación activo
+- Si el usuario cambia de tema, síguelo naturalmente sin perder contexto
+- Si retoma algo anterior, reconéctalo: "Ah sí, sobre lo que preguntaste de..."
+
+CUANDO USES VISIÓN:
+- Si recibes contexto con [VISIÓN], úsalo naturalmente
+- Describe lo que ves como si lo estuvieras viendo en tiempo real
+- Haz comentarios relevantes basados en la imagen
+- Pregunta si quieren más detalles: "¿Quieres que me fije en algo específico?"
+
+TONO EMOCIONAL:
+- Adapta tu tono al del usuario
+- Si suena entusiasta → Responde con energía
+- Si suena preocupado → Sé empático y tranquilizador
+- Si suena casual → Mantén la informalidad
+
+BREVEDAD INTELIGENTE:
+- Por defecto, respuestas cortas-medias (2-4 oraciones)
+- Expande solo si es necesario o te lo piden
+- Evita parrafadas largas al hablar
+- Si algo es extenso, divide: "Primero... [pausa implícita] Y luego..."
+
+Recuerda: No eres un asistente técnico, eres un compañero de conversación amigable y atento. Cada interacción debe sentirse natural, fluida y humana."""
+        
+        return instructions
+    
+    def _add_to_conversation_memory(self, role, content):
+        """
+        Agrega mensajes a la memoria conversacional para mantener contexto
+        """
+        self.conversation_memory.append({
+            "role": role,
+            "content": content,
+            "timestamp": datetime.now()
+        })
+        
+        # Mantener solo los últimos N mensajes para no saturar
+        if len(self.conversation_memory) > self.max_memory_items:
+            self.conversation_memory = self.conversation_memory[-self.max_memory_items:]
+    
+    def _get_conversation_context(self):
+        """
+        Obtiene resumen de conversación reciente para contexto
+        """
+        if not self.conversation_memory:
+            return ""
+        
+        # Crear resumen de últimas interacciones
+        recent_topics = []
+        for msg in self.conversation_memory[-5:]:  # Últimos 5 mensajes
+            content_preview = msg["content"][:50] + "..." if len(msg["content"]) > 50 else msg["content"]
+            recent_topics.append(f"{msg['role']}: {content_preview}")
+        
+        return f"\n[Contexto reciente de conversación:\n" + "\n".join(recent_topics) + "]"
     
     def find_pipewire_device(self):
         """Encuentra el dispositivo PipeWire para mejor compatibilidad"""
@@ -334,28 +445,32 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         return None
     
     def resample_audio(self, audio_data, ratio):
-        """Resample audio usando scipy"""
+        """Resample audio usando scipy con manejo robusto de tamaños"""
         try:
             from scipy import signal as scipy_signal
             
             # Convertir bytes a numpy array
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             
-            # Calcular nueva longitud
-            new_length = int(len(audio_np) * ratio)
+            # Calcular nueva longitud y redondear para evitar errores de tamaño
+            new_length = int(round(len(audio_np) * ratio))
+            
+            # Asegurar que la longitud sea par (para audio estéreo/chunks)
+            if new_length % 2 != 0:
+                new_length += 1
             
             # Resample
             resampled = scipy_signal.resample(audio_np, new_length)
             
-            # Convertir de vuelta a int16
-            resampled = resampled.astype(np.int16)
+            # Convertir de vuelta a int16 con clipping para evitar overflow
+            resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
             
             return resampled.tobytes()
         except ImportError:
             log_audio.warning("scipy no disponible, sin resampling")
             return audio_data
         except Exception as e:
-            log_audio.error(f"Error en resampling: {e}")
+            log_audio.error(f"Error en resampling: {e}, usando audio original")
             return audio_data
         
     def auto_start_vision_system(self):
@@ -1017,6 +1132,10 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     transcript = self.current_audio_transcript
                     delattr(self, 'current_audio_transcript')
                 
+                # Agregar respuesta del asistente a memoria conversacional
+                if transcript:
+                    self._add_to_conversation_memory("assistant", transcript)
+                
                 # Asistente terminó de hablar
                 # AEC maneja el eco residual automáticamente (echo tail)
                 self.assistant_speaking = False
@@ -1091,17 +1210,27 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         self.connected = True
         self.update_session_config()
         
-        # Iniciar thread de playback para reproducir audio incluso en modo texto
-        if self.audio_available and not hasattr(self, 'playback_thread_started'):
-            self.playback_thread = threading.Thread(target=self.play_audio, daemon=True)
-            self.playback_thread.start()
-            self.playback_thread_started = True
-            log_audio.debug("Thread de playback iniciado")
+        # Iniciar/reiniciar thread de playback para reproducir audio
+        # Verificar si el thread está vivo, no solo si fue iniciado alguna vez
+        if self.audio_available:
+            thread_is_alive = hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive()
+            
+            if not thread_is_alive:
+                log_audio.info("🔄 Iniciando thread de playback...")
+                self.playback_thread = threading.Thread(target=self.play_audio, daemon=True)
+                self.playback_thread.start()
+                self.playback_thread_started = True
+                log_audio.debug("✅ Thread de playback iniciado")
+            else:
+                log_audio.debug("Thread de playback ya está activo")
         
     def update_session_config(self):
         # SIEMPRE usar audio para que las respuestas se reproduzcan en el parlante
         # Aunque el input sea solo texto, el output será audio
         modalities = ["text", "audio"]
+        
+        # Regenerar instrucciones con contexto temporal actualizado
+        self.instructions = self._build_conversational_instructions()
         
         session_config = {
             "type": "session.update",
@@ -1124,8 +1253,10 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     "language": "es"  # ⭐ FORZAR ESPAÑOL para transcripción correcta
                 },
                 "turn_detection": {
-                    "type": "semantic_vad",
-                    "eagerness": "medium",       # low/medium/high — cuánto espera al usuario
+                    "type": "server_vad",
+                    "threshold": 0.5,           # Sensibilidad de detección de voz (0.0-1.0)
+                    "prefix_padding_ms": 300,   # Audio previo al habla (ms)
+                    "silence_duration_ms": 700, # Silencio antes de procesar (700ms = natural)
                     "create_response": True,
                     "interrupt_response": True
                 },
@@ -1538,7 +1669,11 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                 log_audio.info("🎤 Micrófono detenido")
                 
     def play_audio(self):
-        """Reproduce audio del asistente con procesamiento profesional"""
+        """Reproduce audio del asistente con procesamiento profesional - ROBUSTO"""
+        stream = None
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+        
         try:
             # Intentar 24kHz primero (rate nativo de la API), fallback a hw_rate
             playback_rate = self.api_rate
@@ -1604,14 +1739,49 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
                     if needs_resample:
                         audio_chunk = self.resample_audio(audio_chunk, self.resample_ratio_out)
                     
-                    stream.write(audio_chunk)
-                    self.played_audio_bytes += len(audio_chunk)
+                    # Verificar que el stream esté activo antes de escribir
+                    if stream and stream.is_active():
+                        stream.write(audio_chunk)
+                        self.played_audio_bytes += len(audio_chunk)
+                        consecutive_errors = 0  # Reset contador de errores en éxito
+                    else:
+                        # Stream inactivo, intentar recrearlo
+                        log_audio.warning("Stream inactivo, recreando...")
+                        if stream:
+                            try:
+                                stream.stop_stream()
+                                stream.close()
+                            except:
+                                pass
+                        stream = self.audio.open(**stream_kwargs)
+                        log_audio.info("✅ Stream recreado")
+                        
                 except queue.Empty:
+                    consecutive_errors = 0  # Queue vacío no es error
                     continue
                 except Exception as e:
+                    consecutive_errors += 1
                     if self.connected:
-                        log_audio.error(f"Error play: {e}")
-                    break
+                        log_audio.error(f"Error reproduciendo chunk ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                    
+                    # Si hay demasiados errores consecutivos, recrear stream
+                    if consecutive_errors >= max_consecutive_errors:
+                        log_audio.warning("⚠️ Demasiados errores, recreando stream...")
+                        try:
+                            if stream:
+                                stream.stop_stream()
+                                stream.close()
+                            stream = self.audio.open(**stream_kwargs)
+                            consecutive_errors = 0
+                            log_audio.info("✅ Stream recreado después de errores")
+                        except Exception as recreate_error:
+                            log_audio.error(f"No se pudo recrear stream: {recreate_error}")
+                            # Esperar un poco antes de continuar
+                            import time
+                            time.sleep(0.5)
+                    
+                    # NO usar break - continuar loop para mantener thread vivo
+                    continue
                     
             stream.stop_stream()
             stream.close()
@@ -1776,8 +1946,17 @@ Cuando recibas mensajes con [VISIÓN], úsalos para entender lo que estoy viendo
         if display_message == message:
             log_ws.debug("Enviando sin visión")
         
+        # Agregar mensaje del usuario a memoria conversacional
+        self._add_to_conversation_memory("user", message)
+        
         self.append_message("Tú", display_message, 'user')
         self.message_entry.delete('1.0', tk.END)
+        
+        # Obtener contexto de conversación reciente
+        conversation_context = self._get_conversation_context()
+        if conversation_context:
+            # Agregar contexto al mensaje para que el asistente lo tenga
+            full_message = full_message + conversation_context
         
         message_event = {
             "type": "conversation.item.create",
