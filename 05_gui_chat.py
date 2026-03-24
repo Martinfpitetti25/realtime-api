@@ -211,8 +211,12 @@ class RealtimeGUIChat:
         self._transitioning_from_wake_word = False
         self._wake_word_return_id = None
         
+        # Timer para actualización periódica de visión en modo voz
+        self._vision_update_timer_id = None
+        self.vision_update_interval_ms = 15000  # Actualizar visión cada 15 segundos
+        
         # Configuración personalizable
-        self.voice = "coral"
+        self.voice = "echo"
         self.instructions = self._build_conversational_instructions()
         self.temperature = 0.85  # Balance entre creatividad y consistencia
         
@@ -267,7 +271,7 @@ PERSONALIDAD Y ESTILO:
 - Habla como en una conversación casual, no como un manual
 - Usa un tono relajado y accesible
 - Muestra interés genuino en lo que te cuentan
-- Ocasionalmente usa fillers naturales como "mmm...", "déjame pensar...", "a ver..." cuando proceses algo complejo
+- EVITA usar fillers como "mmm", "ehh", "hmm" - ve directo al punto
 - Varía tu tono: entusiasta cuando sea apropiado, empático cuando detectes preocupación
 
 CONVERSACIÓN NATURAL:
@@ -293,16 +297,16 @@ CONVERSACIÓN NATURAL:
 
 5. **Timing natural**: 
    - Respuestas simples → Directas y rápidas
-   - Respuestas complejas → Usa "déjame pensar..." o "mmm..." antes
-   - No uses fillers en todo (solo cuando proceses algo que tome un momento)
+   - Respuestas complejas → Ve directo al punto sin rodeos
+   - Mantén fluidez sin pausas innecesarias
 
 REGLAS DE ORO:
 ✅ SÍ habla así:
-- "Ah claro, entiendo"
-- "Mmm, déjame pensar..."
+- "Claro, entiendo"
 - "Interesante, ¿y entonces qué pasó?"
 - "Sí, tiene sentido. ¿Seguiste...?"
 - "Perfecto. ¿Algo más que necesites?"
+- "Déjame ayudarte con eso"
 
 ❌ NO hables así:
 - "Como modelo de lenguaje..."
@@ -665,6 +669,112 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 self.gpt4v_analyzing = False
         
         threading.Thread(target=analyze, daemon=True).start()
+    
+    def capture_and_send_visual_context(self):
+        """Captura imagen y envía contexto visual al asistente en modo voz"""
+        if not self.camera_running or not GPT4V_AVAILABLE or not self.gpt4v_service:
+            log_vision.debug("Captura visual omitida: cámara o GPT-4V no disponibles")
+            return
+        
+        if not self.connected or not self.ws:
+            log_vision.debug("Captura visual omitida: WebSocket no conectado")
+            return
+        
+        try:
+            import time
+            log_vision.debug("Capturando contexto visual para modo voz...")
+            
+            ret, frame = self.read_camera_frame()
+            if ret and frame is not None:
+                result = self.gpt4v_service.quick_description(frame)
+                
+                vision_description = None
+                cost = 0
+                
+                if isinstance(result, dict):
+                    if result.get('success'):
+                        vision_description = result.get('description', '')
+                        cost = result.get('cost', 0)
+                    else:
+                        vision_description = result.get('description', result.get('error', ''))
+                elif isinstance(result, str):
+                    vision_description = result
+                
+                if vision_description:
+                    # Actualizar cache
+                    self.last_gpt4v_description = vision_description
+                    self.last_gpt4v_time = time.time()
+                    self.gpt4v_analyses_count += 1
+                    self.gpt4v_total_cost += cost
+                    
+                    # Enviar contexto visual al asistente
+                    context_message = {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "system",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": f"[CONTEXTO VISUAL ACTUAL] {vision_description}"
+                                }
+                            ]
+                        }
+                    }
+                    self.ws.send(json.dumps(context_message))
+                    
+                    # Actualizar stats en UI
+                    self.root.after(0, self.update_stats)
+                    
+                    log_vision.info(f"👁️ Contexto visual enviado: {vision_description[:60]}...")
+                    log_vision.info(f"💰 ${cost:.4f} | Total: ${self.gpt4v_total_cost:.3f} ({self.gpt4v_analyses_count} análisis)")
+                    
+                    # Mostrar indicador en chat
+                    self.root.after(0, self.append_message, "Sistema", "👁️ Contexto visual capturado", 'system')
+                else:
+                    log_vision.error("Error: No se obtuvo descripción de GPT-4V")
+            else:
+                log_vision.error("Error: No se pudo capturar frame de cámara")
+                
+        except Exception as e:
+            log_vision.error(f"Error capturando contexto visual: {e}")
+    
+    def start_periodic_vision_updates(self):
+        """Inicia actualizaciones periódicas del contexto visual durante modo voz"""
+        # Cancelar timer existente si lo hay
+        self.stop_periodic_vision_updates()
+        
+        if not self.camera_running or not GPT4V_AVAILABLE or not self.gpt4v_service:
+            return
+        
+        log_vision.debug(f"Iniciando actualizaciones periódicas de visión (cada {self.vision_update_interval_ms/1000}s)")
+        self._schedule_next_vision_update()
+    
+    def stop_periodic_vision_updates(self):
+        """Detiene las actualizaciones periódicas del contexto visual"""
+        if self._vision_update_timer_id is not None:
+            try:
+                self.root.after_cancel(self._vision_update_timer_id)
+            except:
+                pass
+            self._vision_update_timer_id = None
+            log_vision.debug("Actualizaciones periódicas de visión detenidas")
+    
+    def _schedule_next_vision_update(self):
+        """Programa la próxima actualización de contexto visual"""
+        if not self.recording:
+            # Si ya no está grabando, no programar más actualizaciones
+            self._vision_update_timer_id = None
+            return
+        
+        # Capturar y enviar contexto visual
+        self.capture_and_send_visual_context()
+        
+        # Programar próxima actualización
+        self._vision_update_timer_id = self.root.after(
+            self.vision_update_interval_ms,
+            self._schedule_next_vision_update
+        )
     
     def setup_ui(self):
         """Crea la interfaz"""
@@ -1372,6 +1482,12 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         else:
             self.append_message("Sistema", f"🎤 Modo manos libres activado", 'system')
         
+        # CAPTURAR CONTEXTO VISUAL si cámara está disponible
+        self.capture_and_send_visual_context()
+        
+        # Iniciar actualizaciones periódicas de contexto visual
+        self.start_periodic_vision_updates()
+        
         log_audio.debug("Iniciando threads de audio...")
         self.audio_thread = threading.Thread(target=self.record_audio, daemon=True)
         self.audio_thread.start()
@@ -1384,6 +1500,9 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         self.recording = False
         self.record_button.config(text="🎤 Iniciar", bg='#e74c3c')
         self.append_message("Sistema", "⏸️ Modo manos libres detenido", 'system')
+        
+        # Detener actualizaciones periódicas de contexto visual
+        self.stop_periodic_vision_updates()
     
     # ========== WAKE WORD DETECTION (PORCUPINE) ==========
     
@@ -1716,6 +1835,10 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         audio_chunk = self.audio_enhancer.get_from_playback_buffer(timeout=0.1)
                         if audio_chunk is None:
                             log_audio.debug("Fin de mensaje de audio")
+                            # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
+                            # Esto evita que se corte el audio antes de terminar
+                            import time
+                            time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
                             continue
                         if audio_chunk == b'':
                             continue
@@ -1723,6 +1846,9 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         audio_chunk = self.output_queue.get(timeout=0.1)
                         if audio_chunk is None:
                             log_audio.debug("Fin de mensaje de audio")
+                            # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
+                            import time
+                            time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
                             continue
                     
                     # Chequear interrupción antes de reproducir
