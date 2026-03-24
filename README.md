@@ -1,25 +1,9 @@
-# Realtime-IA - Asistente de IA en Tiempo Real 🤖
+# Realtime-IA - Asistente de IA en Tiempo Real 
 
 Este proyecto implementa un asistente de IA conversacional usando la API de OpenAI Realtime con capacidades de audio, visión por computadora y detección por wake word.
 
-## 🚀 Instalación Completada
 
-✅ **Repositorio actualizado** desde GitHub
-✅ **Entorno virtual Python** configurado (`.venv/`)
-✅ **Todas las dependencias** instaladas correctamente
-✅ **Archivo `.env`** configurado con API keys
-
-## 📦 Dependencias Instaladas
-
-- websocket-client (conexión en tiempo real)
-- python-dotenv (gestión de variables de entorno)
-- pyaudio (procesamiento de audio)
-- numpy y scipy (procesamiento numérico)
-- opencv-contrib-python (visión por computadora)
-- ultralytics (YOLO para detección de objetos)
-- pvporcupine (detección de wake word)
-
-## 🎯 Scripts Disponibles
+##  Scripts Disponibles
 
 ### Principal
 - **05_gui_chat.py** - Interfaz gráfica mejorada con wake word detection
@@ -33,7 +17,7 @@ Este proyecto implementa un asistente de IA conversacional usando la API de Open
 - 06_robot_assistant.py - Asistente robótico
 - 07_vision_realtime.py - Visión en tiempo real
 
-## 🏃 Cómo Ejecutar
+ Cómo Ejecutar
 
 ### Ejecutar la interfaz gráfica principal:
 ```bash
@@ -45,7 +29,7 @@ O usando el script de inicio rápido:
 ./quick.sh
 ```
 
-## 🔑 Configuración
+##  Configuración
 
 El archivo `.env` ya está configurado con:
 - `OPENAI_API_KEY` - Tu API key de OpenAI
@@ -62,7 +46,7 @@ Para obtener un access key gratuito de Porcupine: https://console.picovoice.ai/
 - [docs/README_DOCKER.md](docs/README_DOCKER.md) - Instrucciones para Docker
 - [docs/VISION_README.md](docs/VISION_README.md) - Documentación de visión
 
-## 🐋 Docker (Opcional)
+## Docker 
 
 El proyecto incluye `Dockerfile` y `docker-compose.yml` para ejecución en contenedores.
 
@@ -70,13 +54,13 @@ El proyecto incluye `Dockerfile` y `docker-compose.yml` para ejecución en conte
 docker-compose up -d
 ```
 
-## 🛠️ Hardware Soportado
+##  Hardware Soportado
 
 - Desktop/Laptop con micrófono y cámara
 - Raspberry Pi (script específico incluido)
 - Cualquier dispositivo Linux con Python 3.10+
 
-## 📖 Estructura del Proyecto
+##  Estructura del Proyecto
 
 ```
 .
@@ -92,23 +76,23 @@ docker-compose up -d
 └── utils/                   # Utilidades
 ```
 
-## 🎤 Características
+##  Características
 
-- ✅ Chat de voz en tiempo real
-- ✅ Reconocimiento de wake word ("jarvis", "computer", etc.)
-- ✅ Visión por computadora con YOLO
-- ✅ Interfaz gráfica moderna
-- ✅ Soporte para Raspberry Pi
-- ✅ Mejoras de audio con cancelación de ruido
+-  Chat de voz en tiempo real
+-  Reconocimiento de wake word ("jarvis", "computer", etc.)
+-  Visión por computadora con YOLO
+-  Interfaz gráfica moderna
+-  Soporte para Raspberry Pi
+-  Mejoras de audio con cancelación de ruido
 
-## 🐛 Solución de Problemas
+##  Solución de Problemas
 
 Si encuentras problemas con audio:
 1. Verifica que PyAudio esté instalado correctamente
 2. Ejecuta `./start_audio.sh` para configurar el audio
 3. Revisa la documentación en `docs/AUDIO_CONFIGURED.md`
 
-## 📝 Licencia
+##  Licencia
 
 MIT License - Ver archivo LICENSE para detalles
 
