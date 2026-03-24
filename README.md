@@ -4,10 +4,10 @@ Este proyecto contiene ejemplos para usar la API de GPT Realtime Mini de OpenAI,
 
 ## Características
 
-- ✅ Conexión básica a la API via WebSocket
-- ✅ Envío de mensajes de texto y recepción de respuestas
-- ✅ Captura de audio desde micrófono (para Raspberry Pi)
-- ✅ Reproducción de audio de respuestas
+-  Conexión básica a la API via WebSocket
+-  Envío de mensajes de texto y recepción de respuestas
+-  Captura de audio desde micrófono (para Raspberry Pi)
+-  Reproducción de audio de respuestas
 
 ## Requisitos
 
