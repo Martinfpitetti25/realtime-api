@@ -2,12 +2,6 @@
 
 Este proyecto implementa un asistente de IA conversacional usando la API de OpenAI Realtime con capacidades de audio, visión por computadora y detección por wake word.
 
-##  Instalación Completada
-
- **Repositorio actualizado** desde GitHub
- **Entorno virtual Python** configurado (`.venv/`)
- **Todas las dependencias** instaladas correctamente
- **Archivo `.env`** configurado con API keys
 
 ##  Dependencias Instaladas
 
