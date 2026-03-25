@@ -454,6 +454,31 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         log_audio.error("No se encontró rate compatible")
         return None
     
+    def _is_multiplexed_device(self, device_index):
+        """Verifica si un device debe usar multiplexado (evitar lock exclusivo)"""
+        if device_index is None:
+            return True
+        
+        try:
+            device_info = self.audio.get_device_info_by_index(device_index)
+            device_name = device_info['name'].lower()
+            
+            # Devices que causan lock exclusivo si se especifica index:
+            # - "pipewire" (alias ALSA → sysdefault → hardware USB directo)
+            # - "sysdefault" (apunta directo a card0)
+            # Devices seguros para multiplexado:
+            # - "default" (PulseAudio compat → PipeWire real)
+            bypass_devices = ['pipewire', 'sysdefault', 'dmix']
+            
+            if any(name in device_name for name in bypass_devices):
+                log_audio.debug(f"Device '{device_name}' detectado - forzando multiplexado")
+                return True
+            
+            return False
+        except Exception as e:
+            log_audio.warning(f"Error verificando device {device_index}: {e}")
+            return True  # En caso de duda, usar multiplexado
+    
     def resample_audio(self, audio_data, ratio):
         """Resample audio usando interpolación lineal para evitar problemas de sincronización"""
         try:
@@ -1780,9 +1805,12 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             }
             
             # Usar dispositivo preferido si está configurado
-            if self.input_device_index is not None:
+            # 🔧 SOLUCIÓN USB BUFFERING: NO especificar index para devices multiplexados
+            if self.input_device_index is not None and not self._is_multiplexed_device(self.input_device_index):
                 stream_kwargs['input_device_index'] = self.input_device_index
-                log_audio.debug(f"Usando dispositivo de entrada: {self.input_device_index}")
+                log_audio.debug(f"Usando dispositivo de entrada específico: {self.input_device_index}")
+            else:
+                log_audio.debug(f"Usando multiplexado del sistema (device index no especificado)")
             
             stream = self.audio.open(**stream_kwargs)
             
@@ -1863,9 +1891,14 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             }
             
             # Usar dispositivo preferido si está configurado
-            if self.output_device_index is not None:
+            # 🔧 SOLUCIÓN USB BUFFERING: NO especificar index para devices multiplexados
+            # Esto evita lock exclusivo en USB y permite que navegador + Python
+            # usen audio simultáneamente a través de PipeWire
+            if self.output_device_index is not None and not self._is_multiplexed_device(self.output_device_index):
                 stream_kwargs['output_device_index'] = self.output_device_index
-                log_audio.debug(f"Usando dispositivo de salida: {self.output_device_index}")
+                log_audio.debug(f"Usando dispositivo de salida específico: {self.output_device_index}")
+            else:
+                log_audio.debug(f"Usando multiplexado del sistema (permite acceso simultáneo)")
             
             try:
                 stream = self.audio.open(**stream_kwargs)
