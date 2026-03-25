@@ -438,9 +438,15 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 stream.close()
                 
                 log_audio.info(f"✅ Audio rate soportado: {rate} Hz")
-                self.hw_rate = rate
-                self.resample_ratio_in = self.api_rate / self.hw_rate
-                self.resample_ratio_out = self.hw_rate / self.api_rate
+                # Solo actualizar hw_rate si NO hay un thread de playback activo
+                # Esto previene cambiar las ratios mientras se reproduce audio
+                if not (hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive()):
+                    self.hw_rate = rate
+                    self.resample_ratio_in = self.api_rate / self.hw_rate
+                    self.resample_ratio_out = self.hw_rate / self.api_rate
+                    log_audio.debug(f"Ratios actualizadas: in={self.resample_ratio_in:.3f}, out={self.resample_ratio_out:.3f}")
+                else:
+                    log_audio.debug(f"Playback thread activo - manteniendo ratios existentes (out={self.resample_ratio_out:.3f})")
                 return rate
             except Exception as e:
                 continue
@@ -449,30 +455,27 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         return None
     
     def resample_audio(self, audio_data, ratio):
-        """Resample audio usando scipy con manejo robusto de tamaños"""
+        """Resample audio usando interpolación lineal para evitar problemas de sincronización"""
         try:
-            from scipy import signal as scipy_signal
-            
             # Convertir bytes a numpy array
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             
-            # Calcular nueva longitud y redondear para evitar errores de tamaño
-            new_length = int(round(len(audio_np) * ratio))
+            # Calcular nueva longitud
+            new_length = int(len(audio_np) * ratio)
             
-            # Asegurar que la longitud sea par (para audio estéreo/chunks)
-            if new_length % 2 != 0:
-                new_length += 1
+            # Si no necesita resampling, retornar original
+            if abs(ratio - 1.0) < 0.001 or new_length == len(audio_np):
+                return audio_data
             
-            # Resample
-            resampled = scipy_signal.resample(audio_np, new_length)
+            # Interpolación lineal simple y rápida
+            old_indices = np.arange(len(audio_np))
+            new_indices = np.linspace(0, len(audio_np) - 1, new_length)
+            resampled = np.interp(new_indices, old_indices, audio_np.astype(np.float32))
             
-            # Convertir de vuelta a int16 con clipping para evitar overflow
+            # Convertir de vuelta a int16 con clipping
             resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
             
             return resampled.tobytes()
-        except ImportError:
-            log_audio.warning("scipy no disponible, sin resampling")
-            return audio_data
         except Exception as e:
             log_audio.error(f"Error en resampling: {e}, usando audio original")
             return audio_data
@@ -1163,6 +1166,11 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 if transcript:
                     self.root.after(0, self.append_message, "Tú (voz)", transcript, 'user')
                     log_ws.info(f"Transcripción: {transcript}")
+                    
+                    # Detectar comando de calibración
+                    if self.detect_calibration_keyword(transcript):
+                        log_audio.info("🎯 Comando de calibración detectado")
+                        self.handle_calibration_command()
             
             elif event_type == 'conversation.item.input_audio_transcription.failed':
                 error = data.get('error', {})
@@ -1504,6 +1512,53 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         # Detener actualizaciones periódicas de contexto visual
         self.stop_periodic_vision_updates()
     
+    def detect_calibration_keyword(self, transcript):
+        """Detecta si la transcripción contiene el comando de calibración"""
+        keywords = [
+            "calibra el micrófono",
+            "calibra el microfono",
+            "calibrar el micrófono", 
+            "calibrar el microfono",
+            "calibra micrófono",
+            "calibra microfono",
+            "recalibra",
+            "recalibrar"
+        ]
+        transcript_lower = transcript.lower()
+        return any(keyword in transcript_lower for keyword in keywords)
+    
+    def handle_calibration_command(self):
+        """Maneja el comando de calibración del micrófono"""
+        try:
+            # Cancelar la respuesta del asistente en curso
+            if self.ws and self.connected:
+                cancel_event = {
+                    "type": "response.cancel"
+                }
+                self.ws.send(json.dumps(cancel_event))
+                log_ws.info("Respuesta cancelada para calibración")
+            
+            # Enviar respuesta de confirmación del sistema
+            self.root.after(0, self.append_message, "Asistente", 
+                          "Entendido, calibrando ahora. Aguarda un segundo.", 'assistant')
+            
+            # Resetear el audio enhancer para recalibrar
+            if self.audio_enhancer:
+                self.audio_enhancer.reset()
+                log_audio.info("🔄 Audio enhancer reseteado para recalibración")
+                
+                # Mensaje para el usuario
+                self.root.after(0, self.append_message, "Sistema", 
+                              "🔧 Calibrando ruido ambiente... (permanece en silencio 2 segundos)", 'system')
+            else:
+                self.root.after(0, self.append_message, "Sistema", 
+                              "⚠️ Audio enhancer no disponible para calibración", 'system')
+                              
+        except Exception as e:
+            log_audio.error(f"Error en calibración: {e}")
+            self.root.after(0, self.append_message, "Sistema", 
+                          f"❌ Error al calibrar: {e}", 'system')
+    
     # ========== WAKE WORD DETECTION (PORCUPINE) ==========
     
     def init_porcupine(self):
@@ -1814,15 +1869,16 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             
             try:
                 stream = self.audio.open(**stream_kwargs)
+                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) - sin resampling")
             except Exception as e_24k:
                 # 24kHz no soportado, fallback a hardware rate (48kHz típico)
-                log_audio.warning(f"24kHz no soportado ({e_24k}), usando {self.hw_rate} Hz con resampling")
+                log_audio.warning(f"24kHz no soportado ({e_24k}), forzando {self.hw_rate} Hz con resampling")
                 playback_rate = self.hw_rate
                 needs_resample = True
                 stream_kwargs['rate'] = playback_rate
                 stream = self.audio.open(**stream_kwargs)
+                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) CON RESAMPLING activo (ratio={self.resample_ratio_out:.2f})")
             
-            log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz)")
             if self.audio_enhancer:
                 log_audio.debug("Playback: Double buffering + Anti-clipping")
             
@@ -1863,7 +1919,9 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                     
                     # Resamplear si el hardware no soporta 24kHz
                     if needs_resample:
+                        original_len = len(audio_chunk)
                         audio_chunk = self.resample_audio(audio_chunk, self.resample_ratio_out)
+                        log_audio.debug(f"Resampling: {original_len} bytes → {len(audio_chunk)} bytes (ratio={self.resample_ratio_out:.2f})")
                     
                     # Verificar que el stream esté activo antes de escribir
                     if stream and stream.is_active():

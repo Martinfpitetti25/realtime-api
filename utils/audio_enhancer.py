@@ -56,8 +56,9 @@ class AudioEnhancer:
         self._init_bandpass_filter()
         
         # Double buffering para playback
-        # Buffer más grande para evitar pérdida de chunks de audio
-        self.playback_buffer = queue.Queue(maxsize=100)
+        # maxsize=0 = ilimitado: NUNCA descartar chunks de audio
+        # La API envía audio más rápido que tiempo real, el buffer absorbe la diferencia
+        self.playback_buffer = queue.Queue(maxsize=0)
         self.buffer_lock = threading.Lock()
     
     def _init_bandpass_filter(self):
@@ -301,22 +302,9 @@ class AudioEnhancer:
     
     def add_to_playback_buffer(self, audio_chunk):
         """Agrega audio al buffer de reproducción (thread-safe)"""
-        try:
-            with self.buffer_lock:
-                if audio_chunk is None:
-                    # Señal de fin
-                    self.playback_buffer.put(None, block=False)
-                else:
-                    # NO procesar el audio de salida - ya viene procesado por OpenAI
-                    # El procesamiento causaba volumen que sube/baja
-                    self.playback_buffer.put(audio_chunk, block=False)
-        except queue.Full:
-            # Si el buffer está lleno, descartar el chunk más viejo
-            try:
-                self.playback_buffer.get_nowait()
-                self.playback_buffer.put(audio_chunk, block=False)
-            except:
-                pass
+        with self.buffer_lock:
+            # Queue ilimitada: put() nunca bloquea ni descarta datos
+            self.playback_buffer.put(audio_chunk)
     
     def get_from_playback_buffer(self, timeout=0.1):
         """Obtiene audio del buffer de reproducción"""
