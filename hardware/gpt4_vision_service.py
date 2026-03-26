@@ -31,15 +31,15 @@ class GPT4VisionService:
         Returns:
             String en base64
         """
-        # Redimensionar si es muy grande (para ahorrar costos)
+        # Redimensionar si es muy grande (balance calidad/costo)
         height, width = frame.shape[:2]
-        max_size = 512
+        max_size = 1024  # Aumentado para mejor reconocimiento de detalles
         
         if max(height, width) > max_size:
             scale = max_size / max(height, width)
             new_width = int(width * scale)
             new_height = int(height * scale)
-            frame = cv2.resize(frame, (new_width, new_height))
+            frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
         
         # Convertir a JPEG
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
@@ -52,8 +52,8 @@ class GPT4VisionService:
     def analyze_image(
         self, 
         frame: np.ndarray,
-        prompt: str = "Describe esta imagen en detalle. Menciona objetos, personas, colores, posiciones y cualquier texto visible.",
-        max_tokens: int = 300
+        prompt: str = "Describe esta imagen en detalle. Sé preciso con: números visibles (léelos exactamente), cantidad de dedos levantados, texto, gestos, expresiones faciales, objetos y sus posiciones.",
+        max_tokens: int = 400
     ) -> Dict:
         """
         Analiza una imagen con GPT-4 Vision
@@ -97,7 +97,7 @@ class GPT4VisionService:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "low"  # "low" es más barato
+                                    "detail": "high"  # "high" para reconocer números, dedos, texto
                                 }
                             }
                         ]
@@ -161,8 +161,8 @@ class GPT4VisionService:
         """
         result = self.analyze_image(
             frame,
-            prompt="Describe brevemente lo que ves en esta imagen en español.",
-            max_tokens=150
+            prompt="Describe lo que ves en esta imagen en español. Sé preciso con: números visibles, cantidad de dedos levantados, texto, gestos de manos, expresiones faciales y objetos. Si hay números o texto, léelos exactamente.",
+            max_tokens=350
         )
         
         if result['success']:

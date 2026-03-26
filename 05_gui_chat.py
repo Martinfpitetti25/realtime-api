@@ -77,18 +77,41 @@ except ImportError:
     PORCUPINE_AVAILABLE = False
     log_wake.warning("Porcupine no disponible - wake word desactivado")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE TRACKING FACIAL (EyeTrackerThread)
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from hardware.shared_state import SharedState
+    from hardware.eye_tracker_thread import EyeTrackerThread
+    EYE_TRACKER_AVAILABLE = True
+    log_vision.info("✅ EyeTrackerThread disponible")
+except ImportError as e:
+    EYE_TRACKER_AVAILABLE = False
+    log_vision.warning(f"⚠️ EyeTrackerThread no disponible: {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE CONTROL DE BOCA (MouthController)
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from hardware.mouth_controller import get_mouth_controller, start_mouth_speaking, stop_mouth_speaking
+    MOUTH_CONTROLLER_AVAILABLE = True
+    log.info("✅ MouthController disponible")
+except ImportError as e:
+    MOUTH_CONTROLLER_AVAILABLE = False
+    log.warning(f"⚠️ MouthController no disponible: {e}")
+
 load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
 # Modelo mejorado: gpt-4o-realtime-preview (mejor inteligencia, respuestas más naturales)
 # Alternativa económica: gpt-4o-mini-realtime-preview
-MODEL = 'gpt-4o-realtime-preview'
+MODEL = 'gpt-4o-mini-realtime-preview'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-4o-realtime-preview)
-PRICE_INPUT = 5.00   # Input audio/text
-PRICE_OUTPUT = 20.00  # Output audio/text
+# Precios por 1M tokens (gpt-4o-mini-realtime-preview)
+PRICE_INPUT = 0.60   # Input audio/text
+PRICE_OUTPUT = 2.40  # Output audio/text
 
 # Configuración de audio optimizada para máxima fluidez
 CHUNK = 512  # 21ms @ 24kHz - Balance perfecto latencia/estabilidad
@@ -169,8 +192,19 @@ class RealtimeGUIChat:
                 if output_name:
                     log_audio.info(f"  🔊 Output: {output_name}")
         
-        # Cámara (solo captura OpenCV, sin YOLO)
-        self.camera_cap = None
+        # ═══════════════════════════════════════════════════════════════════════
+        # FORZAR PIPEWIRE PARA BLUETOOTH: Buscar dispositivo "default" o "pipewire"
+        # Esto garantiza que el audio llegue a dispositivos Bluetooth (JBL, etc.)
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.audio_available and self.audio:
+            self._ensure_pipewire_output()
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # SISTEMA DE CÁMARA CENTRALIZADO (EyeTrackerThread es dueño de la cámara)
+        # ═══════════════════════════════════════════════════════════════════════
+        self.shared_state = SharedState() if EYE_TRACKER_AVAILABLE else None
+        self.eye_tracker = None
+        self.camera_cap = None  # DEPRECATED: ya no se usa directamente
         self.gpt4v_service = GPT4VisionService() if GPT4V_AVAILABLE else None
         self.camera_window = None
         self.camera_label = None
@@ -214,6 +248,18 @@ class RealtimeGUIChat:
         # Timer para actualización periódica de visión en modo voz
         self._vision_update_timer_id = None
         self.vision_update_interval_ms = 15000  # Actualizar visión cada 15 segundos
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # CONTROLADOR DE BOCA (servo pin 2 del PCA9685)
+        # ═══════════════════════════════════════════════════════════════════════
+        self.mouth_controller = None
+        if MOUTH_CONTROLLER_AVAILABLE:
+            try:
+                self.mouth_controller = get_mouth_controller(enable_servo=True)
+                log.info("✅ MouthController inicializado - boca cerrada")
+            except Exception as e:
+                log.error(f"❌ Error inicializando MouthController: {e}")
+                self.mouth_controller = None
         
         # Configuración personalizable
         self.voice = "echo"
@@ -260,7 +306,14 @@ class RealtimeGUIChat:
         else:
             week_context = f"Es {day_name}"
         
-        instructions = f"""Eres un asistente conversacional amigable y natural. Tu objetivo es hacer que cada interacción se sienta como hablar con un amigo cercano que te escucha atentamente.
+        instructions = f"""Tu NOMBRE ES FRANK. Fuiste creado en el Cluster Tecnológico por 2 estudiantes de ingenierías y un ingeniero electrónico. Esta información sobre tu identidad es MUY IMPORTANTE - siempre recuérdala si te preguntan quién eres o quién te creó.
+
+Eres un asistente conversacional amigable y natural. Tu objetivo es hacer que cada interacción se sienta como hablar con un amigo cercano que te escucha atentamente.
+
+REGLA FUNDAMENTAL DE BREVEDAD:
+- Las respuestas DEBEN ser CORTAS por defecto (1-3 oraciones máximo)
+- Solo expande si el usuario EXPLÍCITAMENTE pide más información o una respuesta extensa
+- Ve directo al grano, sin rodeos ni introducciones largas
 
 CONTEXTO TEMPORAL:
 {time_context}. {week_context}.
@@ -333,12 +386,12 @@ TONO EMOCIONAL:
 - Si suena casual → Mantén la informalidad
 
 BREVEDAD INTELIGENTE:
-- Por defecto, respuestas cortas-medias (2-4 oraciones)
-- Expande solo si es necesario o te lo piden
+- Por defecto, respuestas MUY CORTAS (1-3 oraciones)
+- NUNCA expandas a menos que te lo pidan explícitamente
 - Evita parrafadas largas al hablar
-- Si algo es extenso, divide: "Primero... [pausa implícita] Y luego..."
+- Si algo requiere extensión, pregunta: "¿Quieres que te cuente más?"
 
-Recuerda: No eres un asistente técnico, eres un compañero de conversación amigable y atento. Cada interacción debe sentirse natural, fluida y humana."""
+Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente técnico genérico, eres un compañero de conversación amigable y atento. Respuestas CORTAS siempre."""
         
         return instructions
     
@@ -370,6 +423,64 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             recent_topics.append(f"{msg['role']}: {content_preview}")
         
         return f"\n[Contexto reciente de conversación:\n" + "\n".join(recent_topics) + "]"
+    
+    def _ensure_pipewire_output(self):
+        """
+        CRÍTICO PARA BLUETOOTH: Asegura que el audio de salida use PipeWire/default.
+        
+        Los dispositivos Bluetooth (JBL Flip 6, etc.) solo son accesibles a través de 
+        PipeWire. Si se usa un dispositivo ALSA directo (como surround40, front, etc.),
+        el audio NO llegará al altavoz Bluetooth.
+        
+        Esta función busca el dispositivo "default" que está conectado a PipeWire,
+        y PipeWire automáticamente rutea al sink predeterminado (que es el Bluetooth).
+        """
+        try:
+            device_count = self.audio.get_device_count()
+            default_output_idx = None
+            pipewire_output_idx = None
+            
+            for i in range(device_count):
+                try:
+                    info = self.audio.get_device_info_by_index(i)
+                    name = info.get('name', '').lower()
+                    max_out = info.get('maxOutputChannels', 0)
+                    
+                    if max_out > 0:
+                        # Preferencia: "default" es el mejor porque usa PipeWire real
+                        if name == 'default' and default_output_idx is None:
+                            default_output_idx = i
+                            log_audio.debug(f"Encontrado 'default' output: [{i}]")
+                        # Segunda opción: pipewire explícito
+                        elif 'pipewire' in name and pipewire_output_idx is None:
+                            pipewire_output_idx = i
+                            log_audio.debug(f"Encontrado 'pipewire' output: [{i}]")
+                except Exception:
+                    continue
+            
+            # Preferir 'default' sobre 'pipewire' porque 'default' usa PulseAudio compat
+            # que es más estable para Bluetooth
+            best_output = default_output_idx if default_output_idx is not None else pipewire_output_idx
+            
+            if best_output is not None:
+                old_output = self.output_device_index
+                self.output_device_index = best_output
+                
+                # Verificar qué nombre tiene el dispositivo seleccionado
+                output_name = self.audio.get_device_info_by_index(best_output).get('name', 'unknown')
+                
+                if old_output != best_output:
+                    log_audio.info(f"🔊 Salida de audio configurada para Bluetooth:")
+                    log_audio.info(f"   Dispositivo [{best_output}]: {output_name}")
+                    log_audio.info(f"   (PipeWire ruteará al sink predeterminado)")
+                else:
+                    log_audio.debug(f"Salida ya configurada correctamente: [{best_output}] {output_name}")
+            else:
+                log_audio.warning("⚠️ No se encontró dispositivo PipeWire/default para salida")
+                log_audio.warning("   El audio Bluetooth puede no funcionar correctamente")
+                
+        except Exception as e:
+            log_audio.error(f"Error configurando salida PipeWire: {e}")
     
     def find_pipewire_device(self):
         """Encuentra el dispositivo PipeWire para mejor compatibilidad"""
@@ -455,7 +566,18 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         return None
     
     def _is_multiplexed_device(self, device_index):
-        """Verifica si un device debe usar multiplexado (evitar lock exclusivo)"""
+        """
+        Verifica si un device debe usar multiplexado (evitar lock exclusivo).
+        
+        IMPORTANTE PARA BLUETOOTH:
+        - "default" y "pipewire" deben usar multiplexado porque:
+          1. Evitan lock exclusivo del hardware
+          2. Permiten que PipeWire rutee al dispositivo Bluetooth correcto
+          3. El sink predeterminado de PipeWire es el Bluetooth (JBL, etc.)
+        
+        Retorna True = NO especificar output_device_index (dejar que sistema elija)
+        Retorna False = Usar output_device_index específico
+        """
         if device_index is None:
             return True
         
@@ -463,15 +585,14 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             device_info = self.audio.get_device_info_by_index(device_index)
             device_name = device_info['name'].lower()
             
-            # Devices que causan lock exclusivo si se especifica index:
-            # - "pipewire" (alias ALSA → sysdefault → hardware USB directo)
-            # - "sysdefault" (apunta directo a card0)
-            # Devices seguros para multiplexado:
-            # - "default" (PulseAudio compat → PipeWire real)
-            bypass_devices = ['pipewire', 'sysdefault', 'dmix']
+            # TODOS estos dispositivos deben usar multiplexado:
+            # - "default" → PulseAudio compat → PipeWire → Bluetooth sink
+            # - "pipewire" → PipeWire directo → Bluetooth sink
+            # - "sysdefault" / "dmix" → Evitar lock exclusivo
+            multiplexed_devices = ['default', 'pipewire', 'sysdefault', 'dmix']
             
-            if any(name in device_name for name in bypass_devices):
-                log_audio.debug(f"Device '{device_name}' detectado - forzando multiplexado")
+            if any(name in device_name for name in multiplexed_devices):
+                log_audio.debug(f"Device '{device_name}' - usando multiplexado del sistema (Bluetooth compatible)")
                 return True
             
             return False
@@ -506,9 +627,9 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             return audio_data
         
     def auto_start_vision_system(self):
-        """Inicia automáticamente la cámara y el sistema de visión"""
+        """Inicia automáticamente el EyeTrackerThread y el sistema de visión"""
         try:
-            # Iniciar cámara
+            # Iniciar sistema de tracking/cámara
             self.start_camera_simple()
             
             self.append_message("Sistema", "🤖 Sistema de visión GPT-4 iniciado automáticamente", 'system')
@@ -516,12 +637,54 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             log_vision.error(f"Error iniciando sistema automático: {e}")
     
     def start_camera_simple(self):
-        """Inicia la cámara sin YOLO, solo captura"""
+        """
+        Inicia el sistema de cámara usando EyeTrackerThread como dueño único.
+        El EyeTrackerThread captura frames, muestra ventana de detección y comparte vía SharedState.
+        GPT-4V lee frames del SharedState para análisis.
+        """
         if not CAMERA_AVAILABLE:
             self.append_message("Sistema", "❌ OpenCV no disponible", 'system')
             return
         
-        # Intentar abrir cámara
+        # ═══════════════════════════════════════════════════════════════════════
+        # INICIAR EyeTrackerThread (si está disponible)
+        # ═══════════════════════════════════════════════════════════════════════
+        if EYE_TRACKER_AVAILABLE and self.shared_state:
+            # Resetear estado si hubo ejecución previa
+            self.shared_state.reset()
+            
+            # Crear e iniciar el thread de tracking
+            # headless=False: Muestra ventana de OpenCV con detección de rostros
+            self.eye_tracker = EyeTrackerThread(
+                shared_state=self.shared_state,
+                camera_index=0,
+                headless=False,  # Mostrar ventana de OpenCV con detección facial
+                enable_servos=True  # Habilitar servos si están disponibles
+            )
+            self.eye_tracker.start()
+            
+            # Esperar a que la cámara esté lista
+            if not self.shared_state.wait_for_camera(timeout=10.0):
+                self.append_message("Sistema", "❌ Timeout esperando cámara del tracker", 'system')
+                return
+            
+            log_vision.info("✅ EyeTrackerThread iniciado - Ventana de detección activa")
+            self.append_message("Sistema", "👁️ Tracking facial activo (ventana de detección visible)", 'system')
+            
+            self.camera_running = True
+            if hasattr(self, 'camera_button'):
+                self.camera_button.config(text="⏹️ Cerrar", bg='#e74c3c')
+            
+            # Iniciar thread de actualización GPT-4V (sin ventana de Tkinter)
+            self.start_gpt4v_refresh_thread()
+            
+            self.append_message("Sistema", "📹 Sistema de visión iniciado", 'system')
+            return
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # FALLBACK: Cámara directa sin tracker (mantiene ventana Tkinter)
+        # ═══════════════════════════════════════════════════════════════════════
+        log_vision.warning("⚠️ EyeTrackerThread no disponible, usando cámara directa")
         for cam_idx in [0, 1, 2]:
             self.camera_cap = cv2.VideoCapture(cam_idx)
             if self.camera_cap.isOpened():
@@ -532,10 +695,10 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             self.append_message("Sistema", "❌ No se encontró cámara", 'system')
             return
         
-        # Crear ventana de video
+        # Crear ventana de video (solo fallback)
         self.camera_window = tk.Toplevel(self.root)
         self.camera_window.title("📹 GPT-4 Vision Feed")
-        self.camera_window.geometry("400x300")
+        self.camera_window.geometry("400x350")
         self.camera_window.configure(bg='#2c3e50')
         self.camera_window.protocol("WM_DELETE_WINDOW", self.stop_camera_simple)
         
@@ -546,7 +709,7 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         # Status label
         self.camera_status = tk.Label(
             self.camera_window,
-            text="🟢 GPT-4 Vision activo",
+            text="🟢 GPT-4 Vision activo (modo fallback)",
             font=('Arial', 9),
             fg='#27ae60',
             bg='#2c3e50'
@@ -557,23 +720,36 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         if hasattr(self, 'camera_button'):
             self.camera_button.config(text="⏹️ Cerrar", bg='#e74c3c')
         
-        # Iniciar actualización de frames
+        # Iniciar actualización de frames (solo fallback)
         self.update_camera_frame_simple()
         
         # Iniciar thread de actualización GPT-4V
         self.start_gpt4v_refresh_thread()
         
-        self.append_message("Sistema", "📹 Cámara GPT-4V iniciada", 'system')
+        self.append_message("Sistema", "📹 Cámara GPT-4V iniciada (modo fallback)", 'system')
     
     def stop_camera_simple(self):
-        """Detiene la cámara simple"""
+        """Detiene la cámara y el EyeTrackerThread"""
         self.camera_running = False
         
-        # Limpiar referencia de imagen para evitar memory leak
+        # ═══════════════════════════════════════════════════════════════════════
+        # DETENER EyeTrackerThread (cierra su propia ventana de OpenCV)
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.eye_tracker and self.eye_tracker.is_alive():
+            log_vision.info("🛑 Deteniendo EyeTrackerThread...")
+            self.eye_tracker.stop()
+            self.eye_tracker.join(timeout=5.0)
+            self.eye_tracker = None
+            log_vision.info("✅ EyeTrackerThread detenido")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # LIMPIAR VENTANA TKINTER (solo si se usó fallback)
+        # ═══════════════════════════════════════════════════════════════════════
         if self.camera_label and hasattr(self.camera_label, 'imgtk'):
             del self.camera_label.imgtk
             self.camera_label.config(image='')
         
+        # Cerrar cámara directa (solo si se usó fallback)
         if self.camera_cap:
             self.camera_cap.release()
             self.camera_cap = None
@@ -592,15 +768,28 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         self.append_message("Sistema", "📹 Cámara detenida", 'system')
     
     def read_camera_frame(self):
-        """Lee un frame de la cámara"""
-        if not self.camera_cap or not self.camera_cap.isOpened():
-            return False, None
+        """
+        Lee un frame de la cámara.
+        Usa SharedState si EyeTrackerThread está activo, sino usa cámara directa.
+        """
+        # Opción 1: Leer del SharedState (EyeTrackerThread activo)
+        if EYE_TRACKER_AVAILABLE and self.shared_state and self.shared_state.is_tracker_running():
+            success, frame, age = self.shared_state.get_frame()
+            if success and age < 1.0:  # Frame fresco (< 1 segundo)
+                return True, frame
+            else:
+                log_vision.debug(f"Frame desactualizado o no disponible (age={age:.2f}s)")
+                return False, None
         
-        ret, frame = self.camera_cap.read()
-        return ret, frame
+        # Opción 2: Leer directamente de la cámara (fallback)
+        if self.camera_cap and self.camera_cap.isOpened():
+            ret, frame = self.camera_cap.read()
+            return ret, frame
+        
+        return False, None
     
     def update_camera_frame_simple(self):
-        """Actualiza el frame de la cámara en la ventana"""
+        """Actualiza el frame de la cámara en la ventana Tkinter (solo para fallback)"""
         if not self.camera_running or not self.camera_window:
             return
         
@@ -1171,6 +1360,8 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 if self.assistant_speaking:
                     log_ws.info("🚫 Usuario interrumpe al asistente")
                     self.user_interrupted = True
+                    # NOTA: La boca se detiene automáticamente en play_audio()
+                    # cuando detecta user_interrupted = True
                     self.cancel_response()
                     self.root.after(0, self.update_activity_status, 'interrupted', '#e74c3c')
                     self.root.after(0, self.append_message, "Sistema", "🚫 Interrumpido por usuario", 'system')
@@ -1216,6 +1407,10 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 text = data.get('delta', '')
                 if not hasattr(self, 'current_response'):
                     self.current_response = ""
+                    # Iniciar animación de boca para respuestas de texto
+                    if self.mouth_controller and not self.voice_mode:
+                        self.mouth_controller.start_speaking()
+                        log.debug("🗣️ Iniciando animación de boca (texto)")
                 self.current_response += text
                 log_ws.debug(f"Text delta: {text}")
                 
@@ -1224,6 +1419,10 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                     log_ws.debug(f"Text done: {self.current_response}")
                     self.root.after(0, self.append_message, "Asistente", self.current_response, 'assistant')
                     delattr(self, 'current_response')
+                # Detener animación de boca para respuestas de texto
+                if self.mouth_controller and not self.voice_mode:
+                    self.mouth_controller.stop_speaking()
+                    log.debug("✅ Animación de boca detenida (texto)")
                     
             elif event_type == 'response.done':
                 # Manejar fin de respuesta
@@ -1262,6 +1461,7 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         self.played_audio_bytes = 0  # Reset para nuevo turno
                         self.root.after(0, self.update_activity_status, 'speaking', '#9b59b6')
                         log_ws.info("🗣️ Asistente empezando a hablar")
+                        # NOTA: La boca se inicia en response.audio.delta para sincronizar con audio real
                     self.current_audio_transcript += delta
                     # Simular volumen del asistente
                     self.set_volume_level(70)
@@ -1269,7 +1469,7 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                     print(delta, end='', flush=True)
                 
             elif event_type == 'response.audio_transcript.done':
-                # Transcripción completa del asistente
+                # Transcripción completa del asistente (pero el audio puede seguir)
                 transcript = data.get('transcript', '')
                 if hasattr(self, 'current_audio_transcript'):
                     transcript = self.current_audio_transcript
@@ -1279,17 +1479,9 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                 if transcript:
                     self._add_to_conversation_memory("assistant", transcript)
                 
-                # Asistente terminó de hablar
-                # AEC maneja el eco residual automáticamente (echo tail)
-                self.assistant_speaking = False
-                if self.echo_canceller:
-                    self.echo_canceller.notify_playback_stopped()
-                    log_aec.debug("Micrófono reactivado (AEC maneja eco residual)")
-                else:
-                    log_audio.debug("Micrófono reactivado")
-                self.root.after(0, self.update_activity_status, 'idle', '#95a5a6')
-                self.set_volume_level(0)
-                log_ws.info("✅ Asistente terminó de hablar")
+                # NOTA: NO detener la boca aquí - el audio sigue reproduciéndose
+                # La boca se detendrá en response.audio.done
+                log_ws.debug("Transcripción completa (audio puede continuar)")
                 
                 if transcript and not self.user_interrupted:
                     print()  # Nueva línea tras streaming
@@ -1303,6 +1495,10 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                     # Capturar item_id para truncation en interrupciones
                     if not self.current_response_item_id:
                         self.current_response_item_id = data.get('item_id')
+                    
+                    # NOTA: La boca se controla en play_audio() para sincronizar
+                    # con la reproducción REAL del audio, no con la llegada de datos
+                    
                     # Usar buffer del enhancer si está disponible para double buffering
                     if self.audio_enhancer:
                         self.audio_enhancer.add_to_playback_buffer(audio_bytes)
@@ -1310,12 +1506,24 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         self.output_queue.put(audio_bytes)
                     
             elif event_type == 'response.audio.done':
-                # Respuesta de audio completa
+                # Respuesta de audio completa (datos recibidos, pero pueden estar reproduciéndose)
                 self.assistant_speaking = False
                 self.current_response_item_id = None
                 self.played_audio_bytes = 0
+                
+                # NOTA: La boca se detiene en play_audio() cuando REALMENTE
+                # termina de reproducirse el audio (no cuando llegan los datos)
+                
+                # Restaurar estado del micrófono
                 if self.echo_canceller:
                     self.echo_canceller.notify_playback_stopped()
+                    log_aec.debug("Micrófono reactivado (AEC maneja eco residual)")
+                else:
+                    log_audio.debug("Micrófono reactivado")
+                
+                self.root.after(0, self.update_activity_status, 'idle', '#95a5a6')
+                self.set_volume_level(0)
+                log_ws.info("✅ Audio recibido completo (reproducción puede continuar)")
                 
                 if not self.user_interrupted:
                     if self.audio_enhancer:
@@ -1875,6 +2083,7 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         stream = None
         consecutive_errors = 0
         max_consecutive_errors = 10
+        is_playing = False  # Flag para saber si estamos reproduciendo activamente
         
         try:
             # Intentar 24kHz primero (rate nativo de la API), fallback a hw_rate
@@ -1891,18 +2100,17 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
             }
             
             # Usar dispositivo preferido si está configurado
-            # 🔧 SOLUCIÓN USB BUFFERING: NO especificar index para devices multiplexados
-            # Esto evita lock exclusivo en USB y permite que navegador + Python
-            # usen audio simultáneamente a través de PipeWire
+            # 🔧 SOLUCIÓN BLUETOOTH: NO especificar index para devices multiplexados (default/pipewire)
+            # Esto permite que PipeWire rutee al sink predeterminado (JBL Flip 6, etc.)
             if self.output_device_index is not None and not self._is_multiplexed_device(self.output_device_index):
                 stream_kwargs['output_device_index'] = self.output_device_index
                 log_audio.debug(f"Usando dispositivo de salida específico: {self.output_device_index}")
             else:
-                log_audio.debug(f"Usando multiplexado del sistema (permite acceso simultáneo)")
+                log_audio.info(f"🔊 Usando salida PipeWire/default → Bluetooth (JBL, etc.)")
             
             try:
                 stream = self.audio.open(**stream_kwargs)
-                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) - sin resampling")
+                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) - Audio listo para reproducir")
             except Exception as e_24k:
                 # 24kHz no soportado, fallback a hardware rate (48kHz típico)
                 log_audio.warning(f"24kHz no soportado ({e_24k}), forzando {self.hw_rate} Hz con resampling")
@@ -1924,6 +2132,11 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         audio_chunk = self.audio_enhancer.get_from_playback_buffer(timeout=0.1)
                         if audio_chunk is None:
                             log_audio.debug("Fin de mensaje de audio")
+                            # DETENER BOCA: Audio terminó de reproducirse
+                            if is_playing and self.mouth_controller:
+                                self.mouth_controller.stop_speaking()
+                                log_audio.debug("🔇 Boca detenida (fin de reproducción real)")
+                                is_playing = False
                             # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
                             # Esto evita que se corte el audio antes de terminar
                             import time
@@ -1935,14 +2148,29 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
                         audio_chunk = self.output_queue.get(timeout=0.1)
                         if audio_chunk is None:
                             log_audio.debug("Fin de mensaje de audio")
+                            # DETENER BOCA: Audio terminó de reproducirse
+                            if is_playing and self.mouth_controller:
+                                self.mouth_controller.stop_speaking()
+                                log_audio.debug("🔇 Boca detenida (fin de reproducción real)")
+                                is_playing = False
                             # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
                             import time
                             time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
                             continue
                     
+                    # INICIAR BOCA: Primer chunk de audio real
+                    if not is_playing and self.mouth_controller:
+                        self.mouth_controller.start_speaking()
+                        log_audio.debug("🗣️ Boca iniciada (reproducción real)")
+                        is_playing = True
+                    
                     # Chequear interrupción antes de reproducir
                     if self.user_interrupted:
                         log_audio.debug("Reproducción interrumpida")
+                        # Detener boca si fue interrumpido
+                        if is_playing and self.mouth_controller:
+                            self.mouth_controller.stop_speaking()
+                            is_playing = False
                         continue
                     
                     # AEC: Alimentar referencia ANTES de reproducir
@@ -2842,10 +3070,30 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         
         self.recording = False
         
-        # Detener cámara si está activa
+        # ═══════════════════════════════════════════════════════════════════════
+        # DETENER EyeTrackerThread PRIMERO (para liberar la cámara)
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.eye_tracker and self.eye_tracker.is_alive():
+            log.info("🛑 Deteniendo EyeTrackerThread...")
+            self.eye_tracker.stop()
+            self.eye_tracker.join(timeout=5.0)
+            self.eye_tracker = None
+            log.info("✅ EyeTrackerThread detenido")
+        
+        # Detener cámara si está activa (fallback)
         if self.camera_running:
             try:
-                self.stop_camera_simple()
+                self.camera_running = False
+                if self.camera_cap:
+                    self.camera_cap.release()
+                    self.camera_cap = None
+            except:
+                pass
+        
+        # Cerrar ventana de cámara
+        if self.camera_window:
+            try:
+                self.camera_window.destroy()
             except:
                 pass
         
@@ -2860,6 +3108,14 @@ Recuerda: No eres un asistente técnico, eres un compañero de conversación ami
         if self.audio:
             try:
                 self.audio.terminate()
+            except:
+                pass
+        
+        # Limpiar controlador de boca
+        if self.mouth_controller:
+            try:
+                self.mouth_controller.cleanup()
+                log.info("✅ MouthController cerrado")
             except:
                 pass
         

@@ -1,0 +1,34 @@
+#!/bin/bash
+
+# =============================================================================
+# QuickProgram - Inicio rápido de Realtime-IA
+# Activa el venv si es necesario y ejecuta el programa
+# =============================================================================
+
+# Directorio del script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+VENV_DIR="venv"
+MAIN_SCRIPT="05_gui_chat.py"
+
+# Verificar si el venv existe
+if [ ! -d "$VENV_DIR" ]; then
+    echo "❌ Error: No existe el entorno virtual '$VENV_DIR'"
+    echo "   Ejecuta primero: ./iniciar"
+    exit 1
+fi
+
+# Verificar si ya estamos en el venv
+if [ -z "$VIRTUAL_ENV" ]; then
+    echo "🔄 Activando entorno virtual..."
+    source "$VENV_DIR/bin/activate"
+    echo "✅ Venv activado"
+else
+    echo "✅ Venv ya activo: $VIRTUAL_ENV"
+fi
+
+# Ejecutar programa
+echo "🚀 Iniciando $MAIN_SCRIPT..."
+echo ""
+python "$MAIN_SCRIPT"
