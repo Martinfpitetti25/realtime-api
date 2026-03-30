@@ -94,6 +94,7 @@ LOST_MS = 400     # ms sin cara → iniciar búsqueda
 SEARCH_DPS = 18.0 # Velocidad de búsqueda (°/s)
 RETURN_MS = 4000  # ms sin cara → volver al centro
 ACTIVE_SEARCH_MS = 10000  # 10 segundos sin cara → búsqueda activa con cuello
+ACTIVE_SEARCH_INTERVAL_MS = 5000  # 5 segundos mirando en cada dirección
 
 # Ruta al modelo YuNet y config
 FRANKEINSTEIN_DIR = pathlib.Path(__file__).parent.parent / "frankeinstein"
@@ -582,6 +583,7 @@ class EyeTrackerThread(threading.Thread):
             
             # ══════════════════════════════════════════════════════════════════
             # BÚSQUEDA ACTIVA: Girar cabeza después de 10 segundos sin rostro
+            # Gira en intervalos de 5 segundos (izquierda/derecha alternando)
             # ══════════════════════════════════════════════════════════════════
             if dt_lost > ACTIVE_SEARCH_MS:
                 if not self.active_search_mode:
@@ -603,8 +605,25 @@ class EyeTrackerThread(threading.Thread):
                     direction_text = "izquierda" if self.active_search_direction == -1 else "derecha"
                     log.info(f"🔍 Búsqueda activa: girando cabeza a la {direction_text} (objetivo: {self.active_search_target_yaw:.1f}°)")
                 
-                # Ejecutar movimiento de búsqueda
-                # Mover suavemente el cuello hacia el objetivo
+                # Ejecutar movimiento de búsqueda con intervalos de 5 segundos
+                time_since_start = now_ms - self.active_search_start_time
+                
+                # Verificar si es momento de cambiar de dirección (cada 5 segundos)
+                if time_since_start > ACTIVE_SEARCH_INTERVAL_MS:
+                    # Cambiar al lado opuesto
+                    self.active_search_direction *= -1
+                    offset_angle = random.uniform(40, 50) * self.active_search_direction
+                    self.active_search_target_yaw = clamp(
+                        CUELLO_YAW["mid"] + offset_angle,
+                        CUELLO_YAW["lo"],
+                        CUELLO_YAW["hi"]
+                    )
+                    self.active_search_start_time = now_ms
+                    
+                    direction_text = "izquierda" if self.active_search_direction == -1 else "derecha"
+                    log.debug(f"🔍 Búsqueda activa: cambiando a la {direction_text}")
+                
+                # Mover suavemente el cuello hacia el objetivo actual
                 yaw_diff = self.active_search_target_yaw - self.cuello_yaw_ang
                 
                 if abs(yaw_diff) > 2:  # Si aún no llegamos al objetivo
@@ -620,23 +639,6 @@ class EyeTrackerThread(threading.Thread):
                         kit.servo[PIN_CUELLO_YAW].angle = int(self.cuello_yaw_ang)
                     
                     self._apply_eyes(self.lh, self.lv, self.rh, self.rv)
-                    
-                else:
-                    # Llegamos al objetivo, esperar 2 segundos y cambiar dirección
-                    time_at_position = now_ms - self.active_search_start_time
-                    if time_at_position > 2000:  # 2 segundos mirando en esa dirección
-                        # Cambiar al lado opuesto
-                        self.active_search_direction *= -1
-                        offset_angle = random.uniform(40, 50) * self.active_search_direction
-                        self.active_search_target_yaw = clamp(
-                            CUELLO_YAW["mid"] + offset_angle,
-                            CUELLO_YAW["lo"],
-                            CUELLO_YAW["hi"]
-                        )
-                        self.active_search_start_time = now_ms
-                        
-                        direction_text = "izquierda" if self.active_search_direction == -1 else "derecha"
-                        log.debug(f"🔍 Búsqueda activa: cambiando a la {direction_text}")
                 
                 self.shared_state.update_tracker_status(True, self.current_fps, "active_search")
             
