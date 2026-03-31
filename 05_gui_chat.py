@@ -24,7 +24,6 @@ log = get_logger('gui_chat')
 log_audio = get_logger('audio')
 log_ws = get_logger('websocket')
 log_vision = get_logger('vision')
-log_wake = get_logger('wake_word')
 log_aec = get_logger('aec')
 
 try:
@@ -69,14 +68,6 @@ except ImportError:
     AUDIO_DEVICE_MANAGER_AVAILABLE = False
     log_audio.warning("AudioDeviceManager no disponible - usando dispositivos por defecto")
 
-try:
-    import pvporcupine
-    PORCUPINE_AVAILABLE = True
-    log_wake.debug("Porcupine importado correctamente")
-except ImportError:
-    PORCUPINE_AVAILABLE = False
-    log_wake.warning("Porcupine no disponible - wake word desactivado")
-
 # ══════════════════════════════════════════════════════════════════════════════
 # SISTEMA DE TRACKING FACIAL (EyeTrackerThread)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -104,26 +95,22 @@ load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
-# Modelo mejorado: gpt-4o-realtime-preview (mejor inteligencia, respuestas más naturales)
-# Alternativa económica: gpt-4o-mini-realtime-preview
+# MODELO ECONÓMICO: gpt-4o-mini-realtime-preview (más barato, buena calidad)
+# Alternativa premium: gpt-4o-realtime-preview (mejor inteligencia, más caro)
 MODEL = 'gpt-4o-mini-realtime-preview'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-4o-mini-realtime-preview)
-PRICE_INPUT = 0.60   # Input audio/text
-PRICE_OUTPUT = 2.40  # Output audio/text
+# Precios por 1M tokens (gpt-4o-mini-realtime-preview - más económico)
+PRICE_INPUT = 0.60   # Input audio/text (vs $5.00 del premium)
+PRICE_OUTPUT = 2.40  # Output audio/text (vs $20.00 del premium)
 
 # Configuración de audio optimizada para máxima fluidez
-CHUNK = 512  # 21ms @ 24kHz - Balance perfecto latencia/estabilidad
+# OPTIMIZADO: CHUNK aumentado de 512 a 1024 para reducir overhead de CPU (~50% menos llamadas)
+CHUNK = 1024  # 43ms @ 24kHz - Mejor balance latencia/CPU
 FORMAT = pyaudio.paInt16 if AUDIO_AVAILABLE else None
 CHANNELS = 1
 RATE_API = 24000  # Requerido por OpenAI Realtime API
 RATE_HW = 48000   # Hardware rate (se auto-detecta)
-
-# Configuración de Wake Word (Porcupine)
-PORCUPINE_ACCESS_KEY = os.getenv('PORCUPINE_ACCESS_KEY', '')  # Obtener de .env
-DEFAULT_WAKE_WORD = 'jarvis'  # Wake word por defecto
-WAKE_WORD_CONFIRMATION = "Estoy aquí"  # Frase de confirmación
 
 class RealtimeGUIChat:
     def __init__(self, root):
@@ -179,14 +166,33 @@ class RealtimeGUIChat:
         self.input_device_index = None
         self.output_device_index = None
         
-        # Cargar dispositivos preferidos
+        # Cargar dispositivos preferidos o auto-detectar
         if self.audio_device_manager:
             prefs = self.audio_device_manager.get_preferred_devices()
             self.input_device_index = prefs.get("input")
             self.output_device_index = prefs.get("output")
+            
+            # AUTO-DETECCIÓN: Si no hay preferencias guardadas, buscar automáticamente
+            if self.input_device_index is None or self.output_device_index is None:
+                log_audio.info("🔍 Auto-detectando dispositivos físicos...")
+                auto_input, auto_output = self.audio_device_manager.auto_detect_best_devices()
+                
+                if self.input_device_index is None and auto_input is not None:
+                    self.input_device_index = auto_input
+                    # Guardar auto-detección
+                    self.audio_device_manager.set_preferred_devices(input_index=auto_input)
+                    log_audio.info(f"✅ Micrófono auto-detectado y guardado")
+                
+                if self.output_device_index is None and auto_output is not None:
+                    self.output_device_index = auto_output
+                    # Guardar auto-detección
+                    self.audio_device_manager.set_preferred_devices(output_index=auto_output)
+                    log_audio.info(f"✅ Altavoz auto-detectado y guardado")
+            
+            # Mostrar dispositivos cargados
             input_name, output_name = self.audio_device_manager.get_preferred_device_names()
             if input_name or output_name:
-                log_audio.info("Dispositivos preferidos cargados:")
+                log_audio.info("🎧 Dispositivos de audio configurados:")
                 if input_name:
                     log_audio.info(f"  🎤 Input: {input_name}")
                 if output_name:
@@ -216,8 +222,9 @@ class RealtimeGUIChat:
         self.last_gpt4v_time = 0
         self.gpt4v_analyzing = False
         self.gpt4v_thread = None
-        self.gpt4v_refresh_interval = 8  # Background refresh cada 8s
-        self.gpt4v_cache_max_age = 6  # Usar cache si tiene menos de 6s
+        # OPTIMIZADO: Intervalo aumentado de 8s a 30s para reducir costos y CPU
+        self.gpt4v_refresh_interval = 30  # Background refresh cada 30s (antes: 8s)
+        self.gpt4v_cache_max_age = 25  # Usar cache si tiene menos de 25s
         
         # Estado del asistente para interrupción inteligente
         self.assistant_speaking = False
@@ -233,17 +240,6 @@ class RealtimeGUIChat:
         # Memoria conversacional para naturalidad
         self.conversation_memory = []
         self.max_memory_items = 10
-        
-        # Wake Word Detection (Porcupine)
-        self.wake_word_enabled = False
-        self.porcupine = None
-        self.wake_word_thread = None
-        self.wake_word_listening = False
-        self.waiting_for_wake_word = False
-        self.wake_word = DEFAULT_WAKE_WORD
-        self.wake_word_confirmation = WAKE_WORD_CONFIRMATION
-        self._transitioning_from_wake_word = False
-        self._wake_word_return_id = None
         
         # Timer para actualización periódica de visión en modo voz
         self._vision_update_timer_id = None
@@ -264,7 +260,8 @@ class RealtimeGUIChat:
         # Configuración personalizable
         self.voice = "echo"
         self.instructions = self._build_conversational_instructions()
-        self.temperature = 0.85  # Balance entre creatividad y consistencia
+        # OPTIMIZADO: Temperature reducida de 0.85 a 0.6 para mayor precisión en transcripción
+        self.temperature = 0.6  # Mayor precisión, menos "creatividad" errónea
         
         self.setup_ui()
         self.start_connection()
@@ -601,29 +598,48 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             return True  # En caso de duda, usar multiplexado
     
     def resample_audio(self, audio_data, ratio):
-        """Resample audio usando interpolación lineal para evitar problemas de sincronización"""
+        """Resample audio usando scipy o numpy como fallback"""
         try:
             # Convertir bytes a numpy array
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
+            original_length = len(audio_np)
             
-            # Calcular nueva longitud
-            new_length = int(len(audio_np) * ratio)
+            # Calcular nueva longitud (usar round para evitar errores de redondeo)
+            new_length = int(round(original_length * ratio))
             
             # Si no necesita resampling, retornar original
-            if abs(ratio - 1.0) < 0.001 or new_length == len(audio_np):
+            if abs(ratio - 1.0) < 0.01 or new_length == original_length:
                 return audio_data
             
-            # Interpolación lineal simple y rápida
-            old_indices = np.arange(len(audio_np))
-            new_indices = np.linspace(0, len(audio_np) - 1, new_length)
+            # CASO ESPECIAL: Si new_length es 0 o negativo, retornar audio original
+            if new_length <= 0:
+                log_audio.warning(f"Resampling: new_length={new_length} inválido (ratio={ratio:.3f}), usando original")
+                return audio_data
+            
+            # OPTIMIZACIÓN: Usar siempre numpy (más rápido que scipy para audio en tiempo real)
+            # La interpolación lineal es suficiente para audio de voz (no necesitamos FFT de scipy)
+            old_indices = np.arange(original_length)
+            new_indices = np.linspace(0, original_length - 1, new_length)
+            
+            # Interpolación lineal sobre float32 para precisión
             resampled = np.interp(new_indices, old_indices, audio_np.astype(np.float32))
             
             # Convertir de vuelta a int16 con clipping
             resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
             
+            log_audio.debug(f"Resampled: {original_length} → {len(resampled)} samples (ratio={ratio:.3f})")
+            
+            # Verificar que el tamaño sea correcto antes de retornar
+            if len(resampled) != new_length:
+                log_audio.error(f"Resampling size mismatch: expected {new_length}, got {len(resampled)} - usando original")
+                return audio_data
+            
             return resampled.tobytes()
+            
         except Exception as e:
-            log_audio.error(f"Error en resampling: {e}, usando audio original")
+            log_audio.error(f"Error en resampling (ratio={ratio:.3f}, input_size={len(audio_data)}): {e}")
+            import traceback
+            log_audio.debug(traceback.format_exc())
             return audio_data
         
     def auto_start_vision_system(self):
@@ -1351,11 +1367,6 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 log_ws.debug(f"Evento: {event_type}")
             
             if event_type == 'input_audio_buffer.speech_started':
-                # Cancelar auto-retorno a wake word si el usuario habla
-                if self._wake_word_return_id:
-                    self.root.after_cancel(self._wake_word_return_id)
-                    self._wake_word_return_id = None
-                
                 # INTERRUPCIÓN INTELIGENTE: Usuario empezó a hablar
                 if self.assistant_speaking:
                     log_ws.info("🚫 Usuario interrumpe al asistente")
@@ -1533,9 +1544,6 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 else:
                     # Si fue interrumpido, limpiar buffers
                     self.clear_audio_buffers()
-                
-                # WAKE WORD: Solo si wake_word_enabled está activo
-                # (Desactivado por defecto - se activa manualmente)
                     
             elif event_type == 'error':
                 error = data.get('error', {})
@@ -1605,9 +1613,11 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,           # Sensibilidad de detección de voz (0.0-1.0)
+                    # OPTIMIZADO: threshold subido de 0.5 a 0.6 para filtrar mejor el ruido
+                    "threshold": 0.6,           # Sensibilidad de detección de voz (0.0-1.0)
                     "prefix_padding_ms": 300,   # Audio previo al habla (ms)
-                    "silence_duration_ms": 700, # Silencio antes de procesar (700ms = natural)
+                    # OPTIMIZADO: silence_duration subido de 700 a 900 para pausas naturales
+                    "silence_duration_ms": 900, # Silencio antes de procesar (más natural)
                     "create_response": True,
                     "interrupt_response": True
                 },
@@ -1664,10 +1674,6 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 log_audio.debug("Auto-iniciando grabación en 500ms...")
                 self.root.after(500, self.start_recording)
         else:
-            # Detener wake word si está activo
-            if self.wake_word_listening:
-                self.stop_wake_word_listening()
-            
             # Detener grabación si está activa
             if self.recording:
                 self.stop_recording()
@@ -1791,215 +1797,6 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             log_audio.error(f"Error en calibración: {e}")
             self.root.after(0, self.append_message, "Sistema", 
                           f"❌ Error al calibrar: {e}", 'system')
-    
-    # ========== WAKE WORD DETECTION (PORCUPINE) ==========
-    
-    def init_porcupine(self):
-        """Inicializa Porcupine para detección de wake word"""
-        if not PORCUPINE_AVAILABLE or not self.audio_available:
-            log_wake.warning("Porcupine no disponible")
-            return False
-        
-        if not PORCUPINE_ACCESS_KEY:
-            log_wake.warning("Necesitas configurar PORCUPINE_ACCESS_KEY en .env")
-            log_wake.info("Obtén tu access key gratis en: https://console.picovoice.ai/")
-            self.append_message("Sistema", "⚠️ Wake word requiere PORCUPINE_ACCESS_KEY en .env", 'system')
-            self.append_message("Sistema", "Obtén tu key gratis en: https://console.picovoice.ai/", 'system')
-            return False
-        
-        try:
-            log_wake.debug(f"Intentando inicializar con wake word: '{self.wake_word}'")
-            self.porcupine = pvporcupine.create(
-                access_key=PORCUPINE_ACCESS_KEY,
-                keywords=[self.wake_word]
-            )
-            log_wake.info(f"✅ Porcupine inicializado - Escuchando: '{self.wake_word}'")
-            return True
-        except Exception as e:
-            error_msg = str(e)
-            log_wake.error(f"Error inicializando Porcupine: {error_msg}")
-            
-            # Mensajes específicos según el error
-            if "invalid" in error_msg.lower() or "authentication" in error_msg.lower():
-                self.append_message("Sistema", "❌ Access Key inválida o expirada", 'system')
-                self.append_message("Sistema", "Verifica tu PORCUPINE_ACCESS_KEY en .env", 'system')
-            elif "keyword" in error_msg.lower():
-                self.append_message("Sistema", f"❌ Wake word '{self.wake_word}' no disponible", 'system')
-                self.append_message("Sistema", "Prueba: 'computer' o 'alexa'", 'system')
-            else:
-                self.append_message("Sistema", f"❌ Error wake word: {error_msg[:80]}", 'system')
-            
-            self.append_message("Sistema", "ℹ️ Continuando en modo voz sin wake word", 'system')
-            return False
-    
-    def cleanup_porcupine(self):
-        """Limpia recursos de Porcupine"""
-        if self.porcupine:
-            try:
-                self.porcupine.delete()
-                self.porcupine = None
-                log_wake.debug("Porcupine limpiado")
-            except Exception as e:
-                log_wake.error(f"Error limpiando Porcupine: {e}")
-    
-    def start_wake_word_listening(self):
-        """Inicia el thread de escucha de wake word"""
-        if not self.init_porcupine():
-            # Si falla, usar modo normal sin wake word
-            self.wake_word_enabled = False
-            self.start_recording()
-            return
-        
-        self.wake_word_enabled = True
-        self.waiting_for_wake_word = True
-        self.wake_word_listening = True
-        
-        # Actualizar UI
-        self.record_button.config(text="👂 Esperando Wake Word", bg='#f39c12')
-        self.append_message("Sistema", f"👂 Esperando wake word: '{self.wake_word}'", 'system')
-        self.append_message("Sistema", f"💡 Di '{self.wake_word}' para activar el asistente", 'system')
-        
-        # Iniciar thread
-        self.wake_word_thread = threading.Thread(target=self.listen_for_wake_word, daemon=True)
-        self.wake_word_thread.start()
-    
-    def stop_wake_word_listening(self):
-        """Detiene la escucha de wake word"""
-        self.wake_word_listening = False
-        self.waiting_for_wake_word = False
-        self.cleanup_porcupine()
-        
-        if self.wake_word_thread and self.wake_word_thread.is_alive():
-            self.wake_word_thread.join(timeout=1.0)
-    
-    def listen_for_wake_word(self):
-        """Thread que escucha continuamente la wake word"""
-        try:
-            # Detectar rate soportado
-            if self.find_supported_rate() is None:
-                log_wake.error("No se pudo encontrar rate soportado")
-                return
-            
-            # Porcupine requiere 16kHz
-            porcupine_rate = 16000
-            porcupine_chunk = self.porcupine.frame_length
-            
-            # Preparar stream
-            stream_kwargs = {
-                'format': FORMAT,
-                'channels': CHANNELS,
-                'rate': porcupine_rate,
-                'input': True,
-                'frames_per_buffer': porcupine_chunk
-            }
-            
-            if self.input_device_index is not None:
-                stream_kwargs['input_device_index'] = self.input_device_index
-            
-            stream = self.audio.open(**stream_kwargs)
-            log_wake.info(f"👂 Escuchando wake word... ({porcupine_rate} Hz)")
-            
-            while self.wake_word_listening and self.waiting_for_wake_word:
-                try:
-                    pcm = stream.read(porcupine_chunk, exception_on_overflow=False)
-                    pcm = np.frombuffer(pcm, dtype=np.int16)
-                    
-                    keyword_index = self.porcupine.process(pcm)
-                    
-                    if keyword_index >= 0:
-                        log_wake.info(f"✅ Wake word '{self.wake_word}' detectada!")
-                        self.root.after(0, self.on_wake_word_detected)
-                        break  # Salir del loop de escucha
-                    
-                except Exception as e:
-                    if self.wake_word_listening:
-                        log_wake.error(f"Error: {e}")
-                    break
-            
-            stream.stop_stream()
-            stream.close()
-            log_wake.debug("Escucha detenida")
-            
-        except Exception as e:
-            log_wake.error(f"Error en thread: {e}")
-            self.root.after(0, self.append_message, "Error", f"Wake word: {e}", 'system')
-    
-    def on_wake_word_detected(self):
-        """Callback cuando se detecta la wake word"""
-        log_wake.info("🎯 Wake word detectada! Procesando...")
-        
-        # Detener escucha de wake word completamente
-        self.waiting_for_wake_word = False
-        self.wake_word_listening = False
-        self._transitioning_from_wake_word = True  # Evitar race condition con response.audio.done
-        
-        # Limpiar Porcupine para liberar recursos
-        self.cleanup_porcupine()
-        
-        # Actualizar UI
-        self.record_button.config(text="🎙️ Activado!", bg='#27ae60')
-        self.append_message("Usuario", f"[{self.wake_word}]", 'user')
-        
-        # Enviar confirmación al asistente
-        self.send_confirmation_message()
-        
-        # Dar tiempo al thread de wake word para cerrar el stream del mic
-        self.root.after(500, self.transition_to_recording)
-    
-    def send_confirmation_message(self):
-        """Envía mensaje de confirmación 'Estoy aquí' al asistente"""
-        if self.connected and self.ws:
-            event = {
-                "type": "conversation.item.create",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": f"[WAKE WORD DETECTADA - Responde solo: '{self.wake_word_confirmation}']"
-                        }
-                    ]
-                }
-            }
-            self.ws.send(json.dumps(event))
-            
-            # Solicitar respuesta
-            response_event = {"type": "response.create"}
-            self.ws.send(json.dumps(response_event))
-            
-            log_wake.info(f"Enviando confirmación: '{self.wake_word_confirmation}'")
-    
-    def transition_to_recording(self):
-        """Transición de wake word a grabación normal"""
-        # Esperar a que termine de hablar el asistente
-        if self.assistant_speaking:
-            log_wake.debug("Esperando que termine la confirmación...")
-            self.root.after(500, self.transition_to_recording)
-            return
-        
-        # Esperar a que el thread de wake word libere el micrófono
-        if self.wake_word_thread and self.wake_word_thread.is_alive():
-            log_wake.debug("Esperando que thread de wake word libere el mic...")
-            self.root.after(200, self.transition_to_recording)
-            return
-        
-        # Transición completada
-        self._transitioning_from_wake_word = False
-        log_wake.info("🎤 Transición completa, iniciando grabación...")
-        self.start_recording()
-    
-    def _auto_return_to_wake_word(self):
-        """Vuelve automáticamente a modo wake word si no hay actividad"""
-        self._wake_word_return_id = None
-        if not self.recording or self.assistant_speaking:
-            return
-        if not self.wake_word_enabled or not self.voice_mode:
-            return
-        log_wake.info("🔄 Sin actividad, volviendo a modo wake word...")
-        self.stop_recording()
-    
-    # ========== FIN WAKE WORD DETECTION ==========
         
     def record_audio(self):
         try:
@@ -2085,6 +1882,10 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         max_consecutive_errors = 10
         is_playing = False  # Flag para saber si estamos reproduciendo activamente
         
+        # Capturar hw_rate y ratios al inicio del thread para evitar cambios durante ejecución
+        playback_hw_rate = self.hw_rate
+        playback_resample_ratio = self.resample_ratio_out
+        
         try:
             # Intentar 24kHz primero (rate nativo de la API), fallback a hw_rate
             playback_rate = self.api_rate
@@ -2113,12 +1914,12 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) - Audio listo para reproducir")
             except Exception as e_24k:
                 # 24kHz no soportado, fallback a hardware rate (48kHz típico)
-                log_audio.warning(f"24kHz no soportado ({e_24k}), forzando {self.hw_rate} Hz con resampling")
-                playback_rate = self.hw_rate
+                log_audio.warning(f"24kHz no soportado ({e_24k}), forzando {playback_hw_rate} Hz con resampling")
+                playback_rate = playback_hw_rate
                 needs_resample = True
                 stream_kwargs['rate'] = playback_rate
                 stream = self.audio.open(**stream_kwargs)
-                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) CON RESAMPLING activo (ratio={self.resample_ratio_out:.2f})")
+                log_audio.info(f"🔊 Altavoz activado ({playback_rate} Hz) CON RESAMPLING activo (ratio={playback_resample_ratio:.4f})")
             
             if self.audio_enhancer:
                 log_audio.debug("Playback: Double buffering + Anti-clipping")
@@ -2181,8 +1982,18 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     # Resamplear si el hardware no soporta 24kHz
                     if needs_resample:
                         original_len = len(audio_chunk)
-                        audio_chunk = self.resample_audio(audio_chunk, self.resample_ratio_out)
-                        log_audio.debug(f"Resampling: {original_len} bytes → {len(audio_chunk)} bytes (ratio={self.resample_ratio_out:.2f})")
+                        original_samples = original_len // 2  # bytes to samples (int16 = 2 bytes)
+                        expected_samples = int(round(original_samples * playback_resample_ratio))
+                        
+                        audio_chunk_resampled = self.resample_audio(audio_chunk, playback_resample_ratio)
+                        
+                        # Verificar que el resampling funcionó correctamente
+                        resampled_samples = len(audio_chunk_resampled) // 2
+                        if abs(resampled_samples - expected_samples) > 1:
+                            log_audio.warning(f"Resampling deviation: expected ~{expected_samples}, got {resampled_samples} samples")
+                        
+                        log_audio.debug(f"Resampling: {original_len} bytes ({original_samples} samples) → {len(audio_chunk_resampled)} bytes ({resampled_samples} samples) | ratio={playback_resample_ratio:.4f}")
+                        audio_chunk = audio_chunk_resampled
                     
                     # Verificar que el stream esté activo antes de escribir
                     if stream and stream.is_active():
@@ -2207,7 +2018,14 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 except Exception as e:
                     consecutive_errors += 1
                     if self.connected:
-                        log_audio.error(f"Error reproduciendo chunk ({consecutive_errors}/{max_consecutive_errors}): {e}")
+                        error_msg = str(e)
+                        log_audio.error(f"Error reproduciendo chunk ({consecutive_errors}/{max_consecutive_errors}): {error_msg}")
+                        
+                        # Si es error de broadcast/shape, dar más detalles
+                        if "broadcast" in error_msg or "shape" in error_msg:
+                            log_audio.error(f"  → Problema de resampling detectado")
+                            log_audio.error(f"  → hw_rate={playback_hw_rate}, api_rate={self.api_rate}, ratio_out={playback_resample_ratio:.4f}")
+                            log_audio.error(f"  → needs_resample={needs_resample}, playback_rate={playback_rate}")
                     
                     # Si hay demasiados errores consecutivos, recrear stream
                     if consecutive_errors >= max_consecutive_errors:
@@ -2551,14 +2369,14 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         ).pack(side=tk.RIGHT, padx=5)
     
     def open_audio_config(self):
-        """Abre ventana de configuración de dispositivos de audio"""
+        """Abre ventana de configuración de dispositivos de audio mejorada"""
         if not self.audio_device_manager:
             self.append_message("Sistema", "❌ Gestor de audio no disponible", 'system')
             return
         
         config_win = tk.Toplevel(self.root)
         config_win.title("🎧 Configuración de Audio")
-        config_win.geometry("550x500")
+        config_win.geometry("650x700")
         config_win.configure(bg='#f0f0f0')
         config_win.transient(self.root)
         config_win.grab_set()
@@ -2571,6 +2389,43 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             bg='#f0f0f0',
             fg='#2c3e50'
         ).pack(pady=15)
+        
+        # ESTADO ACTUAL
+        status_frame = tk.Frame(config_win, bg='#d5f4e6', relief=tk.SOLID, borderwidth=2)
+        status_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
+        
+        tk.Label(
+            status_frame,
+            text="🟢 Estado Actual",
+            font=('Arial', 11, 'bold'),
+            bg='#d5f4e6',
+            fg='#27ae60'
+        ).pack(pady=(10, 5))
+        
+        # Mostrar dispositivos actualmente en uso
+        current_input, current_output = self.audio_device_manager.get_preferred_device_names()
+        
+        current_input_label = tk.Label(
+            status_frame,
+            text=f"🎤 Micrófono: {current_input if current_input else 'No configurado'}",
+            font=('Arial', 9),
+            bg='#d5f4e6',
+            fg='#2c3e50',
+            wraplength=550,
+            justify=tk.LEFT
+        )
+        current_input_label.pack(padx=10, pady=2, anchor=tk.W)
+        
+        current_output_label = tk.Label(
+            status_frame,
+            text=f"🔊 Altavoz: {current_output if current_output else 'No configurado'}",
+            font=('Arial', 9),
+            bg='#d5f4e6',
+            fg='#2c3e50',
+            wraplength=550,
+            justify=tk.LEFT
+        )
+        current_output_label.pack(padx=10, pady=(2, 10), anchor=tk.W)
         
         main_frame = tk.Frame(config_win, bg='#f0f0f0')
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
@@ -2590,7 +2445,8 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         input_selection = 0
         if current_input_name:
             for i, name in enumerate(input_names):
-                if current_input_name in name:
+                # Comparar solo el nombre base sin etiquetas
+                if any(part in name for part in current_input_name.split()):
                     input_selection = i
                     break
         
@@ -2599,19 +2455,22 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         input_dropdown = tk.OptionMenu(input_frame, input_var, *input_names)
         input_dropdown.config(
             bg='white',
-            font=('Arial', 10),
+            font=('Arial', 9),
             relief=tk.SOLID,
             borderwidth=1,
             highlightthickness=0,
-            width=45
+            width=55
         )
         input_dropdown["menu"].config(bg='white', font=('Arial', 9))
         input_dropdown.pack(fill=tk.X, padx=10, pady=10)
         
-        # Botón test micrófono
+        # Botones de test y ayuda
+        input_buttons = tk.Frame(input_frame, bg='#f0f0f0')
+        input_buttons.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
         test_input_btn = tk.Button(
-            input_frame,
-            text="🎤 Probar Micrófono (1s)",
+            input_buttons,
+            text="🎤 Probar (1s)",
             command=lambda: self.test_audio_device(input_var.get(), "input"),
             bg='#3498db',
             fg='white',
@@ -2619,7 +2478,15 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             relief=tk.FLAT,
             cursor='hand2'
         )
-        test_input_btn.pack(pady=(0, 10))
+        test_input_btn.pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(
+            input_buttons,
+            text="⭐ = Dispositivo físico recomendado",
+            font=('Arial', 8),
+            bg='#f0f0f0',
+            fg='#7f8c8d'
+        ).pack(side=tk.LEFT, padx=10)
         
         # DISPOSITIVO DE SALIDA (Altavoces)
         output_frame = tk.LabelFrame(main_frame, text="🔊 Dispositivo de Salida (Altavoces)", 
@@ -2630,7 +2497,8 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         output_selection = 0
         if current_output_name:
             for i, name in enumerate(output_names):
-                if current_output_name in name:
+                # Comparar solo el nombre base sin etiquetas
+                if any(part in name for part in current_output_name.split()):
                     output_selection = i
                     break
         
@@ -2639,19 +2507,22 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         output_dropdown = tk.OptionMenu(output_frame, output_var, *output_names)
         output_dropdown.config(
             bg='white',
-            font=('Arial', 10),
+            font=('Arial', 9),
             relief=tk.SOLID,
             borderwidth=1,
             highlightthickness=0,
-            width=45
+            width=55
         )
         output_dropdown["menu"].config(bg='white', font=('Arial', 9))
         output_dropdown.pack(fill=tk.X, padx=10, pady=10)
         
-        # Botón test altavoces
+        # Botones de test y ayuda
+        output_buttons = tk.Frame(output_frame, bg='#f0f0f0')
+        output_buttons.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
         test_output_btn = tk.Button(
-            output_frame,
-            text="🔊 Probar Altavoces (1s silencio)",
+            output_buttons,
+            text="🔊 Probar (1s silencio)",
             command=lambda: self.test_audio_device(output_var.get(), "output"),
             bg='#3498db',
             fg='white',
@@ -2659,7 +2530,70 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             relief=tk.FLAT,
             cursor='hand2'
         )
-        test_output_btn.pack(pady=(0, 10))
+        test_output_btn.pack(side=tk.LEFT, padx=5)
+        
+        tk.Label(
+            output_buttons,
+            text="⭐ = Dispositivo físico recomendado",
+            font=('Arial', 8),
+            bg='#f0f0f0',
+            fg='#7f8c8d'
+        ).pack(side=tk.LEFT, padx=10)
+        
+        # BOTÓN DE AUTO-DETECCIÓN
+        auto_detect_frame = tk.Frame(main_frame, bg='#fff3cd', relief=tk.SOLID, borderwidth=2)
+        auto_detect_frame.pack(fill=tk.X, pady=15)
+        
+        def run_auto_detect():
+            log_audio.info("🔍 Ejecutando auto-detección...")
+            auto_input, auto_output = self.audio_device_manager.auto_detect_best_devices()
+            
+            if auto_input is not None:
+                # Encontrar el nombre en la lista
+                devices = self.audio_device_manager.get_devices()
+                for dev in devices["input"]:
+                    if dev["index"] == auto_input:
+                        # Buscar en input_names
+                        for name in input_names:
+                            if dev["name"] in name:
+                                input_var.set(name)
+                                break
+                        break
+            
+            if auto_output is not None:
+                # Encontrar el nombre en la lista
+                devices = self.audio_device_manager.get_devices()
+                for dev in devices["output"]:
+                    if dev["index"] == auto_output:
+                        # Buscar en output_names
+                        for name in output_names:
+                            if dev["name"] in name:
+                                output_var.set(name)
+                                break
+                        break
+            
+            self.append_message("Sistema", "✅ Auto-detección completada - Revisa las selecciones", 'system')
+        
+        tk.Button(
+            auto_detect_frame,
+            text="🤖 Auto-Detectar Dispositivos Físicos",
+            command=run_auto_detect,
+            bg='#ffc107',
+            fg='#2c3e50',
+            font=('Arial', 10, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=20,
+            pady=8
+        ).pack(pady=10)
+        
+        tk.Label(
+            auto_detect_frame,
+            text="Busca automáticamente micrófono y altavoz USB/Bluetooth/Auxiliar",
+            font=('Arial', 8),
+            bg='#fff3cd',
+            fg='#856404'
+        ).pack(pady=(0, 10))
         
         # INFO
         info_frame = tk.Frame(main_frame, bg='#ecf0f1', relief=tk.SOLID, borderwidth=1)
@@ -2667,11 +2601,14 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         
         tk.Label(
             info_frame,
-            text="💡 Los dispositivos marcados con (Default) son los del sistema.\n"
-                 "Los cambios se guardan automáticamente al aplicar.",
+            text="💡 Leyenda:\n"
+                 "⭐ = Dispositivo físico (USB/Bluetooth/Auxiliar) - RECOMENDADO\n"
+                 "🔌 = USB  |📶 = Bluetooth  |🎙️ = Interno  |⚙️ = Virtual\n"
+                 "\nLos cambios se guardan automáticamente al aplicar.\n"
+                 "Usa 'Auto-Detectar' para encontrar dispositivos conectados.",
             font=('Arial', 8),
             bg='#ecf0f1',
-            fg='#7f8c8d',
+            fg='#34495e',
             justify=tk.LEFT
         ).pack(padx=10, pady=10)
         
@@ -2691,13 +2628,16 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             self.input_device_index = input_idx
             self.output_device_index = output_idx
             
-            # Mensaje de confirmación
-            input_name = input_var.get().replace("🎤 ", "").replace("   ", "").replace(" (Default)", "")[:30]
-            output_name = output_var.get().replace("🔊 ", "").replace("   ", "").replace(" (Default)", "")[:30]
+            # Obtener nombres completos actualizados
+            saved_input, saved_output = self.audio_device_manager.get_preferred_device_names()
             
             self.append_message("Sistema", 
-                              f"✅ Dispositivos guardados:\n  🎤 {input_name}...\n  🔊 {output_name}...", 
+                              f"✅ Dispositivos guardados:", 
                               'system')
+            if saved_input:
+                self.append_message("Sistema", f"  🎤 {saved_input}", 'system')
+            if saved_output:
+                self.append_message("Sistema", f"  🔊 {saved_output}", 'system')
             
             # Si está grabando, advertir que debe reiniciar
             if self.recording:

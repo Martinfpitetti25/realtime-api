@@ -22,8 +22,34 @@ class AudioDeviceManager:
         self.audio = pyaudio.PyAudio() if AUDIO_AVAILABLE else None
         self.config = self.load_config()
         
+    def _classify_device_type(self, device_name: str) -> str:
+        """Clasifica el tipo de dispositivo basado en su nombre"""
+        name_lower = device_name.lower()
+        
+        # Dispositivos virtuales/sistema (baja prioridad)
+        if any(x in name_lower for x in ['default', 'pipewire', 'pulse', 'sysdefault', 'dmix', 'null']):
+            return 'virtual'
+        
+        # Dispositivos USB físicos (ALTA PRIORIDAD)
+        if 'usb' in name_lower:
+            return 'usb'
+        
+        # Dispositivos Bluetooth (ALTA PRIORIDAD)
+        if any(x in name_lower for x in ['bluetooth', 'bluez', 'bt']):
+            return 'bluetooth'
+        
+        # Dispositivos HDMI (baja prioridad para audio conversacional)
+        if 'hdmi' in name_lower:
+            return 'hdmi'
+        
+        # Dispositivos internos (media prioridad)
+        if any(x in name_lower for x in ['built-in', 'internal', 'analog']):
+            return 'internal'
+        
+        return 'unknown'
+    
     def get_devices(self) -> Dict[str, List[Dict]]:
-        """Obtiene lista de todos los dispositivos de entrada y salida"""
+        """Obtiene lista de todos los dispositivos de entrada y salida con clasificación"""
         if not self.audio:
             return {"input": [], "output": []}
         
@@ -45,7 +71,8 @@ class AudioDeviceManager:
                         "default_sample_rate": info.get("defaultSampleRate", 0),
                         "is_default_input": i == self.audio.get_default_input_device_info()["index"],
                         "is_default_output": i == self.audio.get_default_output_device_info()["index"],
-                        "is_pipewire": "pipewire" in device_name.lower() or "default" in device_name.lower()
+                        "is_pipewire": "pipewire" in device_name.lower() or "default" in device_name.lower(),
+                        "device_type": self._classify_device_type(device_name)  # Nuevo campo
                     }
                     
                     # Agregar a la lista correspondiente
@@ -62,37 +89,70 @@ class AudioDeviceManager:
         except Exception as e:
             print(f"[ERROR] Error obteniendo dispositivos: {e}")
         
+        # PRIORIZAR dispositivos físicos (USB, Bluetooth) sobre virtuales
+        priority_order = {'usb': 1, 'bluetooth': 2, 'internal': 3, 'unknown': 4, 'hdmi': 5, 'virtual': 6}
+        devices["input"].sort(key=lambda d: (priority_order.get(d['device_type'], 999), d['index']))
+        devices["output"].sort(key=lambda d: (priority_order.get(d['device_type'], 999), d['index']))
+        
         return devices
     
     def get_device_names(self) -> Tuple[List[str], List[str]]:
-        """Obtiene nombres de dispositivos para mostrar en GUI"""
+        """Obtiene nombres de dispositivos para mostrar en GUI con tipo y estado"""
         devices = self.get_devices()
         
         input_names = []
         output_names = []
         
+        # Emojis por tipo de dispositivo
+        type_emoji = {
+            'usb': '🔌',
+            'bluetooth': '📶',
+            'internal': '🎙️',
+            'hdmi': '📺',
+            'virtual': '⚙️',
+            'unknown': '❓'
+        }
+        
         # Dispositivos de entrada (micrófonos)
         for dev in devices["input"]:
-            name = dev["name"]
-            # Priorizar PipeWire/Default
-            if dev["is_pipewire"]:
-                name = f"🎤 {name} (PipeWire - Recomendado)"
+            emoji = type_emoji.get(dev["device_type"], '🎤')
+            base_name = dev["name"]
+            
+            # Truncar nombres muy largos
+            if len(base_name) > 40:
+                base_name = base_name[:37] + "..."
+            
+            # Formato según prioridad
+            if dev["device_type"] in ['usb', 'bluetooth']:
+                # Dispositivos físicos DESTACADOS
+                type_label = dev["device_type"].upper()
+                name = f"{emoji} {base_name} [{type_label}] ⭐"
             elif dev["is_default_input"]:
-                name = f"🎤 {name} (Default)"
+                name = f"{emoji} {base_name} (Sistema)"
             else:
-                name = f"   {name}"
+                name = f"{emoji} {base_name}"
+            
             input_names.append(name)
         
         # Dispositivos de salida (altavoces)
         for dev in devices["output"]:
-            name = dev["name"]
-            # Priorizar PipeWire/Default
-            if dev["is_pipewire"]:
-                name = f"🔊 {name} (PipeWire - Recomendado)"
+            emoji = type_emoji.get(dev["device_type"], '🔊')
+            base_name = dev["name"]
+            
+            # Truncar nombres muy largos
+            if len(base_name) > 40:
+                base_name = base_name[:37] + "..."
+            
+            # Formato según prioridad
+            if dev["device_type"] in ['usb', 'bluetooth']:
+                # Dispositivos físicos DESTACADOS
+                type_label = dev["device_type"].upper()
+                name = f"{emoji} {base_name} [{type_label}] ⭐"
             elif dev["is_default_output"]:
-                name = f"🔊 {name} (Default)"
+                name = f"{emoji} {base_name} (Sistema)"
             else:
-                name = f"   {name}"
+                name = f"{emoji} {base_name}"
+            
             output_names.append(name)
         
         # Si no hay dispositivos, agregar opción "ninguno"
@@ -108,14 +168,61 @@ class AudioDeviceManager:
         devices = self.get_devices()
         device_list = devices.get(device_type, [])
         
-        # Limpiar el nombre (quitar emojis y "(Default)")
-        clean_name = device_name.replace("🎤 ", "").replace("🔊 ", "").replace("   ", "").replace(" (Default)", "").strip()
+        # Limpiar el nombre (quitar emojis y etiquetas)
+        import re
+        # Remover emojis y etiquetas como [USB], [BLUETOOTH], (Sistema), ⭐, etc.
+        clean_name = re.sub(r'[🔌📶🎙️📺⚙️❓🎤🔊⭐]', '', device_name)
+        clean_name = re.sub(r'\[.*?\]', '', clean_name)  # Remover [USB], [BLUETOOTH]
+        clean_name = re.sub(r'\(.*?\)', '', clean_name)  # Remover (Sistema), (Default)
+        clean_name = clean_name.strip()
         
         for dev in device_list:
-            if dev["name"] == clean_name:
+            if dev["name"].strip() == clean_name:
                 return dev["index"]
         
         return None
+    
+    def auto_detect_best_devices(self) -> Tuple[Optional[int], Optional[int]]:
+        """Auto-detecta los mejores dispositivos físicos disponibles"""
+        devices = self.get_devices()
+        
+        best_input = None
+        best_output = None
+        
+        # Prioridad: USB > Bluetooth > Internal > Default
+        priority = ['usb', 'bluetooth', 'internal', 'unknown', 'virtual']
+        
+        # Buscar mejor input
+        for device_type in priority:
+            for dev in devices["input"]:
+                if dev["device_type"] == device_type:
+                    best_input = dev["index"]
+                    print(f"[AUTO-DETECT] Input: [{dev['index']}] {dev['name']} ({device_type})")
+                    break
+            if best_input is not None:
+                break
+        
+        # Buscar mejor output (evitar HDMI si hay alternativas)
+        for device_type in priority:
+            if device_type == 'hdmi':  # Skip HDMI en primera pasada
+                continue
+            for dev in devices["output"]:
+                if dev["device_type"] == device_type:
+                    best_output = dev["index"]
+                    print(f"[AUTO-DETECT] Output: [{dev['index']}] {dev['name']} ({device_type})")
+                    break
+            if best_output is not None:
+                break
+        
+        # Si no encontró nada, aceptar HDMI como último recurso
+        if best_output is None:
+            for dev in devices["output"]:
+                if dev["device_type"] == 'hdmi':
+                    best_output = dev["index"]
+                    print(f"[AUTO-DETECT] Output (fallback HDMI): [{dev['index']}] {dev['name']}")
+                    break
+        
+        return best_input, best_output
     
     def get_preferred_devices(self) -> Dict[str, Optional[int]]:
         """Obtiene los dispositivos preferidos guardados"""
@@ -134,7 +241,7 @@ class AudioDeviceManager:
         self.save_config()
     
     def get_preferred_device_names(self) -> Tuple[Optional[str], Optional[str]]:
-        """Obtiene los nombres de los dispositivos preferidos"""
+        """Obtiene los nombres de los dispositivos preferidos con tipo"""
         devices = self.get_devices()
         prefs = self.get_preferred_devices()
         
@@ -145,14 +252,16 @@ class AudioDeviceManager:
         if prefs["input"] is not None:
             for dev in devices["input"]:
                 if dev["index"] == prefs["input"]:
-                    input_name = dev["name"]
+                    type_label = dev["device_type"].upper()
+                    input_name = f"{dev['name']} [{type_label}]"
                     break
         
         # Buscar nombre del dispositivo de salida
         if prefs["output"] is not None:
             for dev in devices["output"]:
                 if dev["index"] == prefs["output"]:
-                    output_name = dev["name"]
+                    type_label = dev["device_type"].upper()
+                    output_name = f"{dev['name']} [{type_label}]"
                     break
         
         return input_name, output_name

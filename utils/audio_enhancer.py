@@ -49,8 +49,10 @@ class AudioEnhancer:
         self.pre_emphasis_alpha = 0.97  # Factor de pre-énfasis
         self.last_sample = 0
         
-        # Filtro pasa-banda para voz (300-3400 Hz) - NUEVO
-        self.use_bandpass = True  # Activar/desactivar filtro
+        # Filtro pasa-banda para voz (300-3400 Hz)
+        # OPTIMIZADO: Desactivado por defecto - Whisper ya filtra frecuencias no-vocales
+        # Activar solo si hay problemas específicos de ruido de baja/alta frecuencia
+        self.use_bandpass = False  # Desactivado para mejor rendimiento
         self.bandpass_low = 300   # Frecuencia baja (Hz)
         self.bandpass_high = 3400 # Frecuencia alta (Hz)
         self._init_bandpass_filter()
