@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  realtime-api:
+    build: .
+    container_name: realtime-api
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    devices:
+      - /dev/snd:/dev/snd # Audio (Linux/Raspberry Pi)
+      - /dev/video0:/dev/video0 # Cámara (Linux/Raspberry Pi)
+    ports:
+      - "7860:7860" # Cambia el puerto si usas una interfaz web
+    stdin_open: true
+    tty: true

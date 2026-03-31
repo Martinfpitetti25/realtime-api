@@ -1,8 +1,57 @@
+# Variables de entorno
 .env
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-*.wav
-*.mp3
+*.pyd
+.Python
+*.so
+
+# Entornos virtuales
 venv/
 .venv/
+env/
+ENV/
+
+# Archivos de audio temporales
+*.wav
+*.mp3
+*.ogg
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Archivos de backup (mantener en backups/)
+*.backup
+*_backup.py
+*.bak
+*.old
+*.corrupted
+*.tmp
+
+# Archivos comprimidos (mantener en backups/ si son necesarios)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Modelos grandes (opcional: comentar si quieres versionarlos)
+# models/*.pt
+
+# Config local
+.audio_config
+.camera_config

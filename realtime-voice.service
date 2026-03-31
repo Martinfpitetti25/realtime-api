@@ -1,0 +1,23 @@
+[Unit]
+Description=Realtime IA Voice Assistant (Headless)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cluster
+WorkingDirectory=/home/cluster/Projects/Realtime-IA
+ExecStart=/home/cluster/Projects/Realtime-IA/.venv/bin/python /home/cluster/Projects/Realtime-IA/headless_voice.py
+Restart=on-failure
+RestartSec=10
+
+# Sin display — headless
+Environment=DISPLAY=
+Environment=HOME=/home/cluster
+
+# Logs van a journald: ver con "journalctl -u realtime-voice -f"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
