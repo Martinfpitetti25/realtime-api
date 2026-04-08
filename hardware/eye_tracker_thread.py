@@ -25,6 +25,7 @@ import random
 import threading
 import sys
 from typing import Optional
+from collections import deque
 
 # Importar SharedState
 from hardware.shared_state import SharedState
@@ -177,11 +178,14 @@ class EyeTrackerThread(threading.Thread):
         self.active_search_direction = 1  # 1 = derecha, -1 = izquierda
         self.active_search_start_time = 0.0
         
-        # Estado del parpadeo
+        # Estado del parpadeo (gestionado por BlinkThread separado)
         self.blink_phase = "IDLE"
         self.next_blink_time = 0.0
         self.blink_state_end = 0.0
         self.blinks_to_do = 0
+        self._blink_thread: Optional[threading.Thread] = None
+        self._blink_stop = threading.Event()
+        self._eyelid_lock = threading.Lock()  # Protege acceso a servos de párpados
         
         # Contadores de FPS
         self.frames = 0
@@ -280,6 +284,7 @@ class EyeTrackerThread(threading.Thread):
     
     def _smooth_eyelid(self, target_angle_sup: int, target_angle_inf: int, steps: int = 6, delay: float = 0.012, is_closing: bool = True) -> None:
         """Mueve los párpados suavemente con interpolación gradual.
+        Seguro para llamar desde BlinkThread (usa _eyelid_lock).
         
         Args:
             target_angle_sup: Ángulo objetivo superior (65 abierto, 95 cerrado)
@@ -291,90 +296,103 @@ class EyeTrackerThread(threading.Thread):
         if not self.enable_servos:
             return
         
-        current_sup = int(kit.servo[PIN_PARPADO_SUP].angle) if hasattr(kit.servo[PIN_PARPADO_SUP], 'angle') else PARPADO_SUP_ABIERTO
-        current_inf = int(kit.servo[PIN_PARPADO_INF].angle) if hasattr(kit.servo[PIN_PARPADO_INF], 'angle') else PARPADO_INF_ABIERTO
+        with self._eyelid_lock:
+            current_sup = int(kit.servo[PIN_PARPADO_SUP].angle) if hasattr(kit.servo[PIN_PARPADO_SUP], 'angle') else PARPADO_SUP_ABIERTO
+            current_inf = int(kit.servo[PIN_PARPADO_INF].angle) if hasattr(kit.servo[PIN_PARPADO_INF], 'angle') else PARPADO_INF_ABIERTO
         
         # Ajustar velocidad: cerrar es más rápido que abrir
         actual_delay = delay if is_closing else delay * 1.5
         
         for i in range(1, steps + 1):
+            if self._blink_stop.is_set():
+                return
             progress = i / steps
             # Interpolación no lineal (ease-out)
             smooth_progress = 1 - (1 - progress) ** 2
             
-            # Superior cierra/abre primero (30ms de desfase)
-            angle_sup = int(current_sup + (target_angle_sup - current_sup) * smooth_progress)
-            kit.servo[PIN_PARPADO_SUP].angle = clamp(angle_sup, PARPADO_INF_ABIERTO, PARPADO_CERRADO)
-            
-            # Inferior con pequeño retardo
-            if i > 1:  # Desfase de un paso
-                angle_inf = int(current_inf + (target_angle_inf - current_inf) * smooth_progress)
-                kit.servo[PIN_PARPADO_INF].angle = clamp(angle_inf, PARPADO_INF_ABIERTO, PARPADO_CERRADO)
+            with self._eyelid_lock:
+                # Superior cierra/abre primero (30ms de desfase)
+                angle_sup = int(current_sup + (target_angle_sup - current_sup) * smooth_progress)
+                kit.servo[PIN_PARPADO_SUP].angle = clamp(angle_sup, PARPADO_INF_ABIERTO, PARPADO_CERRADO)
+                
+                # Inferior con pequeño retardo
+                if i > 1:  # Desfase de un paso
+                    angle_inf = int(current_inf + (target_angle_inf - current_inf) * smooth_progress)
+                    kit.servo[PIN_PARPADO_INF].angle = clamp(angle_inf, PARPADO_INF_ABIERTO, PARPADO_CERRADO)
             
             time.sleep(actual_delay)
     
-    def _handle_blink(self, now: float) -> None:
-        """Maneja el parpadeo asíncrono con movimientos suaves y timing realista."""
-        if not self.enable_servos:
-            return
+    def _blink_loop(self) -> None:
+        """Loop del thread dedicado al parpadeo. No bloquea el tracking."""
+        self.next_blink_time = time.time() + random.uniform(3.0, 6.0)
         
-        if self.blink_phase == "IDLE":
-            if now > self.next_blink_time:
-                # Decidir número de parpadeos (70% uno, 30% dos)
-                self.blinks_to_do = 1 if random.random() < 0.7 else 2
-                
-                # Decidir intensidad: 80% completo, 20% parcial
-                if random.random() < 0.8:
-                    target_sup = PARPADO_CERRADO
-                    target_inf = PARPADO_CERRADO
-                else:
-                    # Parpadeo parcial
-                    target_sup = 75
-                    target_inf = 60
-                
-                # Cerrar suavemente (rápido)
-                self._smooth_eyelid(target_sup, target_inf, steps=5, delay=0.010, is_closing=True)
-                
-                # Tiempo variable de ojos cerrados (100-200ms normal, 10% más largo)
-                closed_duration = random.uniform(0.10, 0.20) if random.random() < 0.9 else random.uniform(0.25, 0.35)
-                
-                self.blink_phase = "CLOSED"
-                self.blink_state_end = now + closed_duration
-        
-        elif self.blink_phase == "CLOSED":
-            if now > self.blink_state_end:
-                # Abrir suavemente (más lento que cerrar) - valores seguros originales
-                self._smooth_eyelid(PARPADO_SUP_ABIERTO, PARPADO_INF_ABIERTO, steps=6, delay=0.012, is_closing=False)
-                
-                self.blinks_to_do -= 1
-                if self.blinks_to_do > 0:
-                    self.blink_phase = "OPEN_WAIT"
-                    # Espera entre parpadeos múltiples (200-500ms)
-                    self.blink_state_end = now + random.uniform(0.20, 0.50)
-                else:
-                    self.blink_phase = "IDLE"
-                    # Frecuencia más humana: 3-6 segundos (~12 parpadeos/min)
-                    # Ocasionalmente crear clusters: 20% de las veces, parpadeo más rápido
-                    if random.random() < 0.2:
-                        self.next_blink_time = now + random.uniform(1.5, 3.0)  # Cluster
+        while not self._blink_stop.is_set():
+            now = time.time()
+            
+            if self.blink_phase == "IDLE":
+                if now >= self.next_blink_time:
+                    self.blinks_to_do = 1 if random.random() < 0.7 else 2
+                    
+                    if random.random() < 0.8:
+                        target_sup = PARPADO_CERRADO
+                        target_inf = PARPADO_CERRADO
                     else:
-                        self.next_blink_time = now + random.uniform(3.0, 6.0)  # Normal
-        
-        elif self.blink_phase == "OPEN_WAIT":
-            if now > self.blink_state_end:
-                # Cerrar nuevamente para siguiente parpadeo del cluster
-                if random.random() < 0.8:
-                    target_sup = PARPADO_CERRADO
-                    target_inf = PARPADO_CERRADO
+                        target_sup = 75
+                        target_inf = 60
+                    
+                    self._smooth_eyelid(target_sup, target_inf, steps=5, delay=0.010, is_closing=True)
+                    
+                    closed_duration = random.uniform(0.10, 0.20) if random.random() < 0.9 else random.uniform(0.25, 0.35)
+                    self.blink_phase = "CLOSED"
+                    self.blink_state_end = time.time() + closed_duration
                 else:
-                    target_sup = 75
-                    target_inf = 60
-                
-                self._smooth_eyelid(target_sup, target_inf, steps=5, delay=0.010, is_closing=True)
-                
-                closed_duration = random.uniform(0.10, 0.20)
-                self.blink_phase = "CLOSED"
-                self.blink_state_end = now + closed_duration
+                    # Dormir hasta el próximo parpadeo (máx 100ms para responder al stop)
+                    sleep_time = min(self.next_blink_time - now, 0.1)
+                    time.sleep(max(sleep_time, 0))
+                    continue
+            
+            elif self.blink_phase == "CLOSED":
+                if time.time() >= self.blink_state_end:
+                    self._smooth_eyelid(PARPADO_SUP_ABIERTO, PARPADO_INF_ABIERTO, steps=6, delay=0.012, is_closing=False)
+                    
+                    self.blinks_to_do -= 1
+                    if self.blinks_to_do > 0:
+                        self.blink_phase = "OPEN_WAIT"
+                        self.blink_state_end = time.time() + random.uniform(0.20, 0.50)
+                    else:
+                        self.blink_phase = "IDLE"
+                        if random.random() < 0.2:
+                            self.next_blink_time = time.time() + random.uniform(1.5, 3.0)
+                        else:
+                            self.next_blink_time = time.time() + random.uniform(3.0, 6.0)
+                else:
+                    time.sleep(0.01)
+                    continue
+            
+            elif self.blink_phase == "OPEN_WAIT":
+                if time.time() >= self.blink_state_end:
+                    if random.random() < 0.8:
+                        target_sup = PARPADO_CERRADO
+                        target_inf = PARPADO_CERRADO
+                    else:
+                        target_sup = 75
+                        target_inf = 60
+                    
+                    self._smooth_eyelid(target_sup, target_inf, steps=5, delay=0.010, is_closing=True)
+                    
+                    closed_duration = random.uniform(0.10, 0.20)
+                    self.blink_phase = "CLOSED"
+                    self.blink_state_end = time.time() + closed_duration
+                else:
+                    time.sleep(0.01)
+                    continue
+            
+            time.sleep(0.005)
+    
+    def _handle_blink(self, now: float) -> None:
+        """Ya no bloquea el loop: el parpadeo corre en BlinkThread.
+        Se mantiene por compatibilidad pero no hace nada."""
+        pass
     
     def run(self) -> None:
         """Loop principal del thread de tracking."""
@@ -406,6 +424,17 @@ class EyeTrackerThread(threading.Thread):
         # Inicializar servos
         self._init_servos()
         
+        # Arrancar thread dedicado al parpadeo (no bloquea el tracking)
+        if self.enable_servos:
+            self._blink_stop.clear()
+            self._blink_thread = threading.Thread(
+                target=self._blink_loop,
+                daemon=True,
+                name="BlinkThread"
+            )
+            self._blink_thread.start()
+            log.info("✅ BlinkThread iniciado")
+        
         # Señalar que la cámara está lista
         self.shared_state.camera_ready.set()
         self.shared_state.update_tracker_status(True, fps=0.0, mode="idle")
@@ -414,7 +443,6 @@ class EyeTrackerThread(threading.Thread):
         self.last_time = time.time()
         self.last_seen = time.time() * 1000.0
         self.fps_t = time.time()
-        self.next_blink_time = time.time() + random.uniform(3.0, 6.0)
         
         log.info("🎯 Loop de tracking iniciado")
         
@@ -436,11 +464,12 @@ class EyeTrackerThread(threading.Thread):
         if not ok:
             return
         
-        # Rotar frame (cámara rotada físicamente)
-        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        
-        # Actualizar frame en SharedState para que otros threads lo usen
+        # Actualizar frame en SharedState ANTES de rotar (sin copia extra)
+        # La rotación solo se aplica para mostrar en pantalla (headless=False)
         self.shared_state.update_frame(frame)
+        
+        # Rotar solo para display y detección facial (cámara rotada físicamente)
+        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         
         # Contadores de FPS
         self.frames += 1
@@ -718,19 +747,16 @@ class EyeTrackerThread(threading.Thread):
             if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
                 self.shared_state.request_stop()
         
-        # ══════════════════════════════════════════════════════════════════════
-        # OPTIMIZACIÓN: Limitar FPS para reducir carga de CPU
-        # 15 FPS cuando hay cara (seguimiento), 10 FPS sin cara (búsqueda)
-        # Esto reduce ~50% el uso de CPU sin afectar calidad de tracking
-        # ══════════════════════════════════════════════════════════════════════
-        if faces is not None:
-            time.sleep(0.033)  # ~30 FPS con cara (antes: sin límite ~60+ FPS)
-        else:
-            time.sleep(0.066)  # ~15 FPS sin cara (ahorro máximo en idle)
+
     
     def _cleanup(self) -> None:
         """Limpieza al salir."""
         log.info("🔄 Limpiando EyeTrackerThread...")
+        
+        # Detener BlinkThread
+        self._blink_stop.set()
+        if self._blink_thread and self._blink_thread.is_alive():
+            self._blink_thread.join(timeout=1.0)
         
         # Centrar servos
         if self.enable_servos:

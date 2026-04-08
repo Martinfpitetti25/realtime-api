@@ -95,14 +95,13 @@ load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
-# MODELO ECONÓMICO: gpt-4o-mini-realtime-preview (más barato, buena calidad)
-# Alternativa premium: gpt-4o-realtime-preview (mejor inteligencia, más caro)
-MODEL = 'gpt-4o-mini-realtime-preview'
+# Modelo flagship de voz (el más actual disponible en Realtime API)
+MODEL = 'gpt-realtime-1.5'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-4o-mini-realtime-preview - más económico)
-PRICE_INPUT = 0.60   # Input audio/text (vs $5.00 del premium)
-PRICE_OUTPUT = 2.40  # Output audio/text (vs $20.00 del premium)
+# Precios por 1M tokens (gpt-realtime-1.5)
+PRICE_INPUT = 4.00   # Text input $4.00 / Audio input $32.00
+PRICE_OUTPUT = 16.00 # Text output $16.00 / Audio output $64.00
 
 # Configuración de audio optimizada para máxima fluidez
 # OPTIMIZADO: CHUNK aumentado de 512 a 1024 para reducir overhead de CPU (~50% menos llamadas)
@@ -165,30 +164,34 @@ class RealtimeGUIChat:
         self.audio_device_manager = AudioDeviceManager() if AUDIO_DEVICE_MANAGER_AVAILABLE and self.audio_available else None
         self.input_device_index = None
         self.output_device_index = None
-        
+
         # Cargar dispositivos preferidos o auto-detectar
         if self.audio_device_manager:
             prefs = self.audio_device_manager.get_preferred_devices()
             self.input_device_index = prefs.get("input")
             self.output_device_index = prefs.get("output")
-            
+
+            # Restaurar sink Bluetooth si estaba configurado en la sesión anterior
+            output_pw_id = prefs.get("output_pipewire_id")
+            if output_pw_id:
+                log_audio.info(f"🔊 Restaurando Bluetooth preferido (PipeWire ID: {output_pw_id})...")
+                self.audio_device_manager.set_pipewire_default(output_pw_id)
+
             # AUTO-DETECCIÓN: Si no hay preferencias guardadas, buscar automáticamente
             if self.input_device_index is None or self.output_device_index is None:
                 log_audio.info("🔍 Auto-detectando dispositivos físicos...")
                 auto_input, auto_output = self.audio_device_manager.auto_detect_best_devices()
-                
+
                 if self.input_device_index is None and auto_input is not None:
                     self.input_device_index = auto_input
-                    # Guardar auto-detección
                     self.audio_device_manager.set_preferred_devices(input_index=auto_input)
                     log_audio.info(f"✅ Micrófono auto-detectado y guardado")
-                
+
                 if self.output_device_index is None and auto_output is not None:
                     self.output_device_index = auto_output
-                    # Guardar auto-detección
                     self.audio_device_manager.set_preferred_devices(output_index=auto_output)
                     log_audio.info(f"✅ Altavoz auto-detectado y guardado")
-            
+
             # Mostrar dispositivos cargados
             input_name, output_name = self.audio_device_manager.get_preferred_device_names()
             if input_name or output_name:
@@ -197,7 +200,7 @@ class RealtimeGUIChat:
                     log_audio.info(f"  🎤 Input: {input_name}")
                 if output_name:
                     log_audio.info(f"  🔊 Output: {output_name}")
-        
+
         # ═══════════════════════════════════════════════════════════════════════
         # FORZAR PIPEWIRE PARA BLUETOOTH: Buscar dispositivo "default" o "pipewire"
         # Esto garantiza que el audio llegue a dispositivos Bluetooth (JBL, etc.)
@@ -1613,11 +1616,9 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    # OPTIMIZADO: threshold subido de 0.5 a 0.6 para filtrar mejor el ruido
-                    "threshold": 0.6,           # Sensibilidad de detección de voz (0.0-1.0)
+                    "threshold": 0.4,           # Más sensible (0.4 detecta voces normales; 0.6 era muy alto)
                     "prefix_padding_ms": 300,   # Audio previo al habla (ms)
-                    # OPTIMIZADO: silence_duration subido de 700 a 900 para pausas naturales
-                    "silence_duration_ms": 900, # Silencio antes de procesar (más natural)
+                    "silence_duration_ms": 600, # Silencio antes de procesar (ms)
                     "create_response": True,
                     "interrupt_response": True
                 },
@@ -1845,8 +1846,14 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                         data = self.resample_audio(data, self.resample_ratio_in)
                     
                     # Procesamiento de audio antes de enviar a la API
-                    # 1. Echo Canceller: eliminar eco del altavoz capturado por el mic
-                    if self.echo_canceller and self.assistant_speaking:
+                    # 1. Echo Canceller: activo mientras haya audio reproduciéndose O mientras
+                    #    assistant_speaking sea True (la señal del servidor tarda en llegar)
+                    aec_active = self.echo_canceller and (
+                        self.assistant_speaking or 
+                        (self.echo_canceller.is_playing or 
+                         self.echo_canceller.samples_since_stop < self.echo_canceller.echo_tail_samples)
+                    )
+                    if aec_active:
                         data = self.echo_canceller.process(data)
                     
                     # 2. AudioEnhancer: filtro pasa-banda, noise gate, AGC, anti-clipping
@@ -1856,12 +1863,16 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     if self.connected:
                         self.send_audio_chunk(data)
                         
-                        # Debug cada 50 chunks (aprox. 1 segundo)
+                        # Log cada 50 chunks (~1 segundo) para diagnóstico de audio
                         audio_chunk_counter += 1
-                        if audio_chunk_counter % 50 == 0 and volume_percent > 5:
+                        if audio_chunk_counter % 50 == 0:
                             processed_audio = np.frombuffer(data, dtype=np.int16).astype(np.float32)
                             processed_rms = np.sqrt(np.mean(processed_audio ** 2))
-                            log_audio.debug(f"📊 Volumen: {volume_percent:.1f}% | RMS: {processed_rms:.0f}")
+                            gate_info = ""
+                            if self.audio_enhancer:
+                                stats = self.audio_enhancer.get_stats()
+                                gate_info = f" | Gate: {stats['gate_state']} | Ganancia: {stats['current_gain']} | Ruido base: {stats['noise_floor']}"
+                            log_audio.info(f"🎤 AUDIO ENVIADO | Vol: {volume_percent:.1f}% | RMS procesado: {processed_rms:.0f}{gate_info}")
                 except Exception as e:
                     if self.recording:
                         log_audio.error(f"Error audio: {e}")
@@ -2429,10 +2440,34 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         
         main_frame = tk.Frame(config_win, bg='#f0f0f0')
         main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
-        
+
         # Obtener dispositivos
         input_names, output_names = self.audio_device_manager.get_device_names()
-        
+
+        def _rename_device(device_var, device_type):
+            """Permite asignar un nombre amigable a un dispositivo (alias)"""
+            selected = device_var.get()
+            if not selected or 'Sin dispositivos' in selected:
+                return
+            dev_info = self.audio_device_manager.get_device_full_info_from_name(selected, device_type)
+            if not dev_info:
+                self.append_message("Sistema", "❌ No se pudo identificar el dispositivo", 'system')
+                return
+            original_name = dev_info["name"]
+            current_alias = self.audio_device_manager.get_device_alias(original_name) or original_name
+            from tkinter import simpledialog
+            new_name = simpledialog.askstring(
+                "Renombrar dispositivo",
+                f"Nombre para:\n{original_name}",
+                initialvalue=current_alias,
+                parent=config_win
+            )
+            if new_name is not None:
+                self.audio_device_manager.set_device_alias(original_name, new_name.strip())
+                # Refrescar ventana con el nuevo nombre aplicado
+                config_win.destroy()
+                self.open_audio_config()
+
         # DISPOSITIVO DE ENTRADA (Micrófono)
         input_frame = tk.LabelFrame(main_frame, text="🎤 Dispositivo de Entrada (Micrófono)", 
                                      font=('Arial', 11, 'bold'), bg='#f0f0f0', fg='#2c3e50')
@@ -2479,7 +2514,18 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             cursor='hand2'
         )
         test_input_btn.pack(side=tk.LEFT, padx=5)
-        
+
+        tk.Button(
+            input_buttons,
+            text="🏷️ Renombrar",
+            command=lambda: _rename_device(input_var, "input"),
+            bg='#9b59b6',
+            fg='white',
+            font=('Arial', 9, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=5)
+
         tk.Label(
             input_buttons,
             text="⭐ = Dispositivo físico recomendado",
@@ -2531,7 +2577,18 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             cursor='hand2'
         )
         test_output_btn.pack(side=tk.LEFT, padx=5)
-        
+
+        tk.Button(
+            output_buttons,
+            text="🏷️ Renombrar",
+            command=lambda: _rename_device(output_var, "output"),
+            bg='#9b59b6',
+            fg='white',
+            font=('Arial', 9, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2'
+        ).pack(side=tk.LEFT, padx=5)
+
         tk.Label(
             output_buttons,
             text="⭐ = Dispositivo físico recomendado",
@@ -2604,7 +2661,8 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             text="💡 Leyenda:\n"
                  "⭐ = Dispositivo físico (USB/Bluetooth/Auxiliar) - RECOMENDADO\n"
                  "🔌 = USB  |📶 = Bluetooth  |🎙️ = Interno  |⚙️ = Virtual\n"
-                 "\nLos cambios se guardan automáticamente al aplicar.\n"
+                 "\n🏷️ Renombrar: asigna un nombre amigable al dispositivo seleccionado.\n"
+                 "Los cambios se guardan automáticamente al aplicar.\n"
                  "Usa 'Auto-Detectar' para encontrar dispositivos conectados.",
             font=('Arial', 8),
             bg='#ecf0f1',
@@ -2617,34 +2675,53 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         button_frame.pack(fill=tk.X, padx=20, pady=10)
         
         def save_audio_config():
-            # Obtener índices de dispositivos
-            input_idx = self.audio_device_manager.get_device_index_from_name(input_var.get(), "input")
-            output_idx = self.audio_device_manager.get_device_index_from_name(output_var.get(), "output")
-            
-            # Guardar preferencias
-            self.audio_device_manager.set_preferred_devices(input_idx, output_idx)
-            
+            # Obtener info completa de los dispositivos seleccionados (maneja aliases y BT)
+            input_info = self.audio_device_manager.get_device_full_info_from_name(input_var.get(), "input")
+            output_info = self.audio_device_manager.get_device_full_info_from_name(output_var.get(), "output")
+
+            input_idx = input_info["index"] if input_info else None
+            output_idx = output_info["index"] if output_info else None
+            input_pw_id = input_info.get("pipewire_id") if input_info else None
+            output_pw_id = output_info.get("pipewire_id") if output_info else None
+
+            # Si el output es un dispositivo Bluetooth via PipeWire, activarlo como sink default
+            if output_info and output_info.get("via_pipewire") and output_pw_id:
+                log_audio.info(f"🔊 Activando {output_info['name']} como sink PipeWire...")
+                if self.audio_device_manager.set_pipewire_default(output_pw_id):
+                    self.append_message("Sistema",
+                        f"📶 {output_info['name']} activado como salida Bluetooth", 'system')
+
+            # Si el input es Bluetooth via PipeWire, activarlo como source default
+            if input_info and input_info.get("via_pipewire") and input_pw_id:
+                log_audio.info(f"🎤 Activando {input_info['name']} como source PipeWire...")
+                self.audio_device_manager.set_pipewire_default(input_pw_id)
+
+            # Guardar preferencias (incluye pipewire_id para restaurar al reiniciar)
+            self.audio_device_manager.set_preferred_devices(
+                input_idx, output_idx,
+                input_pipewire_id=input_pw_id,
+                output_pipewire_id=output_pw_id
+            )
+
             # Actualizar índices locales
             self.input_device_index = input_idx
             self.output_device_index = output_idx
-            
+
             # Obtener nombres completos actualizados
             saved_input, saved_output = self.audio_device_manager.get_preferred_device_names()
-            
-            self.append_message("Sistema", 
-                              f"✅ Dispositivos guardados:", 
-                              'system')
+
+            self.append_message("Sistema", "✅ Dispositivos guardados:", 'system')
             if saved_input:
                 self.append_message("Sistema", f"  🎤 {saved_input}", 'system')
             if saved_output:
                 self.append_message("Sistema", f"  🔊 {saved_output}", 'system')
-            
+
             # Si está grabando, advertir que debe reiniciar
             if self.recording:
-                self.append_message("Sistema", 
-                                  "⚠️ Detén y reinicia la grabación para aplicar cambios", 
+                self.append_message("Sistema",
+                                  "⚠️ Detén y reinicia la grabación para aplicar cambios",
                                   'system')
-            
+
             config_win.destroy()
         
         tk.Button(

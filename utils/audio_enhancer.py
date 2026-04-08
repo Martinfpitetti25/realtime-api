@@ -36,9 +36,9 @@ class AudioEnhancer:
         # Noise gate adaptativo - INTELIGENTE
         self.noise_floor = None
         self.noise_samples = deque(maxlen=200)  # Más muestras para mejor calibración
-        self.noise_gate_threshold = 250  # Threshold más alto = menos ruido
+        self.noise_gate_threshold = 180  # Threshold inicial más bajo = más sensible
         self.gate_attack = 0.8    # Apertura rápida (80% en 1 frame ~21ms)
-        self.gate_release = 0.100   # Cierre más lento (suave)
+        self.gate_release = 0.04   # Cierre muy lento (evita cortar palabras)
         self.gate_state = 1.0     # Empezar abierto, la calibración lo ajustará
         
         # Smoothing general
@@ -104,11 +104,11 @@ class AudioEnhancer:
             noise_std = np.std(list(self.noise_samples))
             
             # Threshold adaptativo basado en ruido y variabilidad
-            # Si hay mucha variabilidad = ambiente ruidoso, threshold más alto
-            adaptive_multiplier = 2.2 + (noise_std / self.noise_floor) * 0.5
-            adaptive_multiplier = min(adaptive_multiplier, 3.5)  # Limitar
+            # Multiplicador conservador para no cortar voz normal
+            adaptive_multiplier = 1.6 + (noise_std / self.noise_floor) * 0.3
+            adaptive_multiplier = min(adaptive_multiplier, 2.5)  # Limitar (era 3.5, muy agresivo)
             
-            self.noise_gate_threshold = max(180, self.noise_floor * adaptive_multiplier)
+            self.noise_gate_threshold = max(120, self.noise_floor * adaptive_multiplier)
             
             print(f"[CALIBRACIÓN] ✅ Ruido: {self.noise_floor:.0f} | Variabilidad: {noise_std:.0f} | Threshold: {self.noise_gate_threshold:.0f} (x{adaptive_multiplier:.1f})")
             return True

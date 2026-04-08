@@ -63,7 +63,7 @@ class EchoCanceller:
         self.is_playing = False
         self.samples_since_stop = 0
         # Eco residual después de que el altavoz para (ms)
-        self.echo_tail_ms = 350
+        self.echo_tail_ms = 600  # Más cola: el eco rebota en las paredes del robot
         self.echo_tail_samples = int(sample_rate * self.echo_tail_ms / 1000)
         
         # --- Gate suave (reemplaza hard mute) ---
@@ -92,7 +92,7 @@ class EchoCanceller:
         # 0.15-0.30: Laptop / separación media
         # 0.30-0.50: Speaker cerca del mic / robot
         # 0.50-0.80: Mic y speaker muy juntos
-        self.echo_coupling = 0.30
+        self.echo_coupling = 0.55  # Robot InMoov: mic y speaker próximos
         
         # --- Thread safety ---
         self.lock = threading.Lock()
@@ -224,11 +224,11 @@ class EchoCanceller:
                 # Usuario hablando sobre el asistente → INTERRUPCIÓN
                 # Supresión espectral ligera + gate parcialmente abierto
                 output = self._spectral_suppress(audio, strength=0.5)
-                self.gate_target = 0.65
+                self.gate_target = 0.35  # Deja pasar voz real pero atenúa eco (era 0.65)
             else:
                 # Solo eco del altavoz → suprimir fuertemente
                 output = self._spectral_suppress(audio, strength=1.5)
-                self.gate_target = 0.05
+                self.gate_target = 0.02  # Casi cerrado (era 0.05)
             
             # Suavizar gate
             self._smooth_gate()
