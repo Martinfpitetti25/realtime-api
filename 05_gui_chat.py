@@ -145,9 +145,9 @@ URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 PRICE_INPUT = 5.00   # Text input $5.00 / Audio input $40.00
 PRICE_OUTPUT = 20.00 # Text output $20.00 / Audio output $80.00
 
-# Configuración de audio optimizada para máxima fluidez
-# OPTIMIZADO: CHUNK aumentado de 512 a 1024 para reducir overhead de CPU (~50% menos llamadas)
-CHUNK = 1024  # 43ms @ 24kHz - Mejor balance latencia/CPU
+# Configuración de audio optimizada para máxima fluidez y BAJA LATENCIA
+# OPTIMIZADO: CHUNK reducido para menor latencia (~21ms) - balance latencia/CPU
+CHUNK = 512   # 21ms @ 24kHz - Prioridad: baja latencia sobre CPU
 FORMAT = pyaudio.paInt16 if AUDIO_AVAILABLE else None
 CHANNELS = 1
 RATE_API = 24000  # Requerido por OpenAI Realtime API
@@ -1759,11 +1759,11 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.5,           # Balance: detecta voz atenuada por AEC sin falsos positivos
-                    "prefix_padding_ms": 450,   # Más padding para no perder el inicio de palabras
-                    "silence_duration_ms": 900, # Más tiempo para no cortar oraciones con pausas naturales
+                    "threshold": 0.45,          # Más sensible: detecta voz suave y permite interrupciones
+                    "prefix_padding_ms": 350,   # Reducido: respuesta más rápida sin perder inicio
+                    "silence_duration_ms": 550, # Reducido: respuesta más ágil (antes 900ms)
                     "create_response": True,
-                    "interrupt_response": True
+                    "interrupt_response": True   # Crítico: permite interrumpir respuestas
                 },
                 "input_audio_noise_reduction": {
                     "type": "far_field"  # far_field: robot/laptop con mic separado del speaker
@@ -2058,7 +2058,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 'channels': CHANNELS,
                 'rate': playback_rate,
                 'output': True,
-                'frames_per_buffer': CHUNK * 4  # Buffer más grande para playback sin cortes
+                'frames_per_buffer': CHUNK * 2  # Buffer reducido para menor latencia (antes *4)
             }
             
             # Usar dispositivo preferido si está configurado
@@ -2104,9 +2104,9 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                             if self.echo_canceller:
                                 self.echo_canceller.notify_playback_stopped()
                                 log_aec.debug("🔇 AEC notificado: reproducción real terminada")
-                            # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
+                            # Buffer flush - reducido para menor latencia
                             import time
-                            time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
+                            time.sleep(0.08)  # 80ms suficiente para flush (antes 200ms)
                             continue
                         if audio_chunk == b'':
                             continue
@@ -2123,9 +2123,9 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                             if self.echo_canceller:
                                 self.echo_canceller.notify_playback_stopped()
                                 log_aec.debug("🔇 AEC notificado: reproducción real terminada")
-                            # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
+                            # Buffer flush - reducido para menor latencia
                             import time
-                            time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
+                            time.sleep(0.08)  # 80ms suficiente para flush (antes 200ms)
                             continue
                     
                     # INICIAR BOCA: Primer chunk de audio real

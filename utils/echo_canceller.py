@@ -63,14 +63,14 @@ class EchoCanceller:
         self.is_playing = False
         self.samples_since_stop = 0
         # Eco residual después de que el altavoz para (ms)
-        self.echo_tail_ms = 600  # Más cola: el eco rebota en las paredes del robot
+        self.echo_tail_ms = 300  # Reducido de 600ms — con notify en lugar correcto 300ms es suficiente
         self.echo_tail_samples = int(sample_rate * self.echo_tail_ms / 1000)
         
-        # --- Gate suave (reemplaza hard mute) ---
+        # --- Gate suave (reemplaza hard mute) - OPTIMIZADO para fluidez ---
         self.gate = 1.0            # 1.0 = mic abierto, 0.0 = silenciado
         self.gate_target = 1.0
-        self.gate_open_rate = 0.03  # Apertura lenta (evita eco residual)
-        self.gate_close_rate = 0.20 # Cierre rápido (corta eco inmediatamente)
+        self.gate_open_rate = 0.25  # Apertura muy rápida (~150ms) para interrupciones fluidas
+        self.gate_close_rate = 0.15 # Cierre más suave (menos agresivo, mejor transición)
         
         # --- Supresión espectral ---
         self.fft_size = max(frame_size, 256)  # Mínimo 256 para resolución decente
@@ -80,19 +80,23 @@ class EchoCanceller:
         # Ventana pre-calculada para FFT
         self._window = np.hanning(self.fft_size).astype(np.float32)
         
-        # --- Double Talk Detection (DTD) ---
+        # --- Double Talk Detection (DTD) - OPTIMIZADO para interrupciones naturales ---
         # Detecta cuando el usuario habla AL MISMO TIEMPO que el asistente
-        self.dtd_ratio = 2.5        # Si input es 2.5x > eco esperado → usuario hablando
-        self.dtd_min_energy = 400   # Energía mínima para considerar voz real
-        self.input_energy_history = deque(maxlen=10)
+        self.dtd_ratio = 1.8        # Reducido: más fácil detectar interrupciones (antes 2.5)
+        self.dtd_min_energy = 300   # Reducido: detecta voz más suave (antes 400)
+        self.input_energy_history = deque(maxlen=15)  # Más historia para mejor detección
         
-        # --- Acoplamiento de eco ---
-        # Cuánto del altavoz capta el micrófono (depende del hardware)
+        # --- Acoplamiento de eco ADAPTATIVO ---
+        # Cuánto del altavoz capta el micrófono (se calibra automáticamente)
         # 0.05-0.15: Auriculares / buena separación
         # 0.15-0.30: Laptop / separación media
         # 0.30-0.50: Speaker cerca del mic / robot
         # 0.50-0.80: Mic y speaker muy juntos
-        self.echo_coupling = 0.55  # Robot InMoov: mic y speaker próximos
+        self.echo_coupling = 0.25  # Valor inicial (se adapta automáticamente)
+        self.echo_coupling_min = 0.10
+        self.echo_coupling_max = 0.60
+        self.echo_coupling_adapt_rate = 0.05  # Velocidad de adaptación
+        self.measured_couplings = deque(maxlen=50)  # Historial para adaptación
         
         # --- Thread safety ---
         self.lock = threading.Lock()
@@ -209,26 +213,45 @@ class EchoCanceller:
             
             # --- Double Talk Detection ---
             is_double_talk = False
+            confidence = 0.0  # Confianza de que es double-talk
+            
             if input_rms > self.dtd_min_energy:
                 if expected_echo_rms > 0:
                     ratio = input_rms / expected_echo_rms
                     is_double_talk = ratio > self.dtd_ratio
+                    # Calcular confianza (más ratio = más confianza)
+                    confidence = min(1.0, (ratio - self.dtd_ratio) / self.dtd_ratio) if is_double_talk else 0.0
+                    
+                    # === ADAPTACIÓN DEL ECHO COUPLING ===
+                    # Si no es double-talk, el ratio nos dice cuánto eco hay realmente
+                    if not is_double_talk and ratio > 0.1:
+                        measured_coupling = ratio * self.echo_coupling
+                        self.measured_couplings.append(measured_coupling)
+                        if len(self.measured_couplings) >= 10:
+                            # Adaptar coupling basado en mediciones reales
+                            avg_coupling = np.percentile(list(self.measured_couplings), 70)
+                            new_coupling = self.echo_coupling + self.echo_coupling_adapt_rate * (avg_coupling - self.echo_coupling)
+                            self.echo_coupling = np.clip(new_coupling, self.echo_coupling_min, self.echo_coupling_max)
                 else:
                     # No hay referencia → probablemente es voz real
                     is_double_talk = True
+                    confidence = 0.8
             
             self._stats['double_talk'] = is_double_talk
+            self._stats['dtd_confidence'] = confidence
+            self._stats['echo_coupling'] = self.echo_coupling
             
-            # --- Decidir nivel de supresión ---
+            # --- Decidir nivel de supresión (ADAPTATIVO según confianza) ---
             if is_double_talk:
                 # Usuario hablando sobre el asistente → INTERRUPCIÓN
-                # Supresión espectral ligera + gate parcialmente abierto
-                output = self._spectral_suppress(audio, strength=0.5)
-                self.gate_target = 0.35  # Deja pasar voz real pero atenúa eco (era 0.65)
+                # Gate más abierto según confianza de detección
+                suppress_strength = 0.3 + (1 - confidence) * 0.4  # 0.3-0.7 según confianza
+                output = self._spectral_suppress(audio, strength=suppress_strength)
+                self.gate_target = 0.45 + confidence * 0.35  # 0.45-0.80 según confianza
             else:
                 # Solo eco del altavoz → suprimir fuertemente
-                output = self._spectral_suppress(audio, strength=1.5)
-                self.gate_target = 0.02  # Casi cerrado (era 0.05)
+                output = self._spectral_suppress(audio, strength=1.2)
+                self.gate_target = 0.05  # Casi cerrado pero no totalmente
             
             # Suavizar gate
             self._smooth_gate()

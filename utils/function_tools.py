@@ -173,6 +173,25 @@ TOOLS_DEFINITIONS = [
             },
             "required": []
         }
+    },
+    {
+        "type": "function",
+        "name": "web_search",
+        "description": "Busca información en internet usando DuckDuckGo. Usar cuando el usuario pregunte por información actual, noticias, datos que no conoces, o cualquier cosa que requiera búsqueda web. Ejemplos: '¿Qué pasó hoy en las noticias?', '¿Cuál es el precio del dólar?', 'Buscá info sobre X'.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Término de búsqueda. Sé específico para mejores resultados."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Número máximo de resultados a devolver (default: 5, max: 10)"
+                }
+            },
+            "required": ["query"]
+        }
     }
 ]
 
@@ -946,6 +965,179 @@ def get_weather(
     return _get_weather_wttr(city, units, include_forecast)
 
 
+def web_search(
+    query: str,
+    max_results: int = 5
+) -> Dict[str, Any]:
+    """
+    Busca información en internet usando DuckDuckGo.
+    No requiere API key.
+    
+    Args:
+        query: Término de búsqueda
+        max_results: Número máximo de resultados (1-10)
+        
+    Returns:
+        Dict con resultados de búsqueda
+    """
+    import urllib.request
+    import urllib.parse
+    import json as json_module
+    import re
+    
+    try:
+        # Limitar resultados
+        max_results = min(max(1, max_results), 10)
+        
+        # Usar DuckDuckGo HTML lite (más confiable que la API)
+        query_encoded = urllib.parse.quote(query)
+        url = f"https://html.duckduckgo.com/html/?q={query_encoded}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'es-AR,es;q=0.9,en;q=0.8',
+        }
+        
+        req = urllib.request.Request(url, headers=headers)
+        
+        log.debug(f"🔍 web_search: Buscando '{query}'...")
+        
+        with urllib.request.urlopen(req, timeout=15) as response:
+            html = response.read().decode('utf-8', errors='ignore')
+        
+        # Parsear resultados del HTML
+        results = []
+        
+        # Buscar bloques de resultados
+        # DuckDuckGo HTML tiene estructura: <a class="result__a" href="...">título</a>
+        # y <a class="result__snippet">descripción</a>
+        
+        # Patrón para extraer resultados
+        result_pattern = re.compile(
+            r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>.*?'
+            r'<a[^>]*class="result__snippet"[^>]*>([^<]*)</a>',
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        # También intentar patrón alternativo
+        alt_pattern = re.compile(
+            r'<a[^>]*rel="nofollow"[^>]*class="result__url"[^>]*href="([^"]*)"[^>]*>.*?</a>.*?'
+            r'<a[^>]*class="result__a"[^>]*>([^<]*)</a>.*?'
+            r'class="result__snippet"[^>]*>([^<]*)<',
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        # Patrón más simple y robusto
+        simple_pattern = re.compile(
+            r'class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]+)</a>',
+            re.IGNORECASE
+        )
+        snippet_pattern = re.compile(
+            r'class="result__snippet"[^>]*>([^<]+)',
+            re.IGNORECASE
+        )
+        
+        # Extraer URLs y títulos
+        matches = simple_pattern.findall(html)
+        snippets = snippet_pattern.findall(html)
+        
+        for i, (url_match, title) in enumerate(matches[:max_results]):
+            # Limpiar URL (DuckDuckGo usa redirects)
+            if 'uddg=' in url_match:
+                # Extraer URL real del parámetro uddg
+                try:
+                    real_url = urllib.parse.unquote(url_match.split('uddg=')[1].split('&')[0])
+                except:
+                    real_url = url_match
+            else:
+                real_url = url_match
+            
+            # Limpiar título
+            title = title.strip()
+            title = re.sub(r'\s+', ' ', title)
+            
+            # Obtener snippet si existe
+            snippet = ""
+            if i < len(snippets):
+                snippet = snippets[i].strip()
+                snippet = re.sub(r'\s+', ' ', snippet)
+                # Decodificar entidades HTML básicas
+                snippet = snippet.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>').replace('&quot;', '"')
+            
+            if title and real_url and not real_url.startswith('//duckduckgo'):
+                results.append({
+                    "title": title[:200],  # Limitar longitud
+                    "url": real_url,
+                    "snippet": snippet[:300] if snippet else ""
+                })
+        
+        if not results:
+            # Intentar con DuckDuckGo Instant Answer API como fallback
+            api_url = f"https://api.duckduckgo.com/?q={query_encoded}&format=json&no_html=1&skip_disambig=1"
+            req = urllib.request.Request(api_url, headers={'User-Agent': 'FRANK/1.0'})
+            
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json_module.loads(response.read().decode())
+            
+            # Respuesta instantánea
+            if data.get('AbstractText'):
+                results.append({
+                    "title": data.get('Heading', query),
+                    "url": data.get('AbstractURL', ''),
+                    "snippet": data.get('AbstractText', '')[:300]
+                })
+            
+            # Resultados relacionados
+            for topic in data.get('RelatedTopics', [])[:max_results-len(results)]:
+                if isinstance(topic, dict) and topic.get('Text'):
+                    results.append({
+                        "title": topic.get('Text', '')[:100].split(' - ')[0],
+                        "url": topic.get('FirstURL', ''),
+                        "snippet": topic.get('Text', '')[:300]
+                    })
+        
+        if not results:
+            log.warning(f"🔍 web_search({query}): Sin resultados")
+            return {
+                "success": False,
+                "error": "no_results",
+                "message": f"No encontré resultados para '{query}'. Intentá con otros términos."
+            }
+        
+        # Construir mensaje natural
+        message_parts = [f"Encontré {len(results)} resultados para '{query}':\n"]
+        for i, r in enumerate(results, 1):
+            message_parts.append(f"{i}. **{r['title']}**")
+            if r['snippet']:
+                message_parts.append(f"   {r['snippet']}")
+        
+        log.info(f"🔍 web_search({query}): {len(results)} resultados")
+        
+        return {
+            "success": True,
+            "query": query,
+            "results": results,
+            "count": len(results),
+            "message": "\n".join(message_parts)
+        }
+        
+    except urllib.error.URLError as e:
+        log.error(f"🔍 web_search({query}): Error de red - {e}")
+        return {
+            "success": False,
+            "error": "network_error",
+            "message": f"No pude conectarme a internet para buscar: {str(e)}"
+        }
+    except Exception as e:
+        log.error(f"🔍 web_search({query}): Error - {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": f"Error buscando información: {str(e)}"
+        }
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # EJECUTOR DE TOOLS
 # ══════════════════════════════════════════════════════════════════════════════
@@ -958,6 +1150,7 @@ TOOLS_MAP = {
     "control_volume": control_volume,
     "manage_notes": manage_notes,
     "get_weather": get_weather,
+    "web_search": web_search,
 }
 
 
