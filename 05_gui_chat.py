@@ -91,17 +91,28 @@ except ImportError as e:
     MOUTH_CONTROLLER_AVAILABLE = False
     log.warning(f"⚠️ MouthController no disponible: {e}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SISTEMA DE FUNCTION CALLING (Tools)
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from utils.function_tools import get_tools_definitions, execute_tool, TOOLS_MAP
+    FUNCTION_TOOLS_AVAILABLE = True
+    log.info(f"✅ Function Tools disponibles: {list(TOOLS_MAP.keys())}")
+except ImportError as e:
+    FUNCTION_TOOLS_AVAILABLE = False
+    log.warning(f"⚠️ Function Tools no disponibles: {e}")
+
 load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
 # Modelo flagship de voz (el más actual disponible en Realtime API)
-MODEL = 'gpt-realtime-1.5'
+MODEL = 'gpt-4o-realtime-preview'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-realtime-1.5)
-PRICE_INPUT = 4.00   # Text input $4.00 / Audio input $32.00
-PRICE_OUTPUT = 16.00 # Text output $16.00 / Audio output $64.00
+# Precios por 1M tokens (gpt-4o-realtime-preview)
+PRICE_INPUT = 5.00   # Text input $5.00 / Audio input $40.00
+PRICE_OUTPUT = 20.00 # Text output $20.00 / Audio output $80.00
 
 # Configuración de audio optimizada para máxima fluidez
 # OPTIMIZADO: CHUNK aumentado de 512 a 1024 para reducir overhead de CPU (~50% menos llamadas)
@@ -150,7 +161,7 @@ class RealtimeGUIChat:
         self.resample_ratio_in = self.api_rate / self.hw_rate
         self.resample_ratio_out = self.hw_rate / self.api_rate
         
-        # Audio Enhancer profesional
+        # Audio Enhancer profesional (noise floor se restaura después de cargar audio_device_manager)
         self.audio_enhancer = AudioEnhancer(sample_rate=RATE_API) if AUDIO_ENHANCER_AVAILABLE else None
         if self.audio_enhancer:
             log_audio.info("✅ Procesamiento profesional activado (AGC + Anti-clipping + Noise Gate)")
@@ -200,6 +211,14 @@ class RealtimeGUIChat:
                     log_audio.info(f"  🎤 Input: {input_name}")
                 if output_name:
                     log_audio.info(f"  🔊 Output: {output_name}")
+
+        # Restaurar noise floor calibrado de sesión anterior → calibración instantánea sin silencio
+        if self.audio_enhancer and self.audio_device_manager:
+            _saved_noise_floor = self.audio_device_manager.get_noise_floor()
+            if _saved_noise_floor is not None:
+                self.audio_enhancer.noise_floor = _saved_noise_floor
+                self.audio_enhancer.noise_gate_threshold = max(120, _saved_noise_floor * 1.6)
+                log_audio.info(f"✅ Noise floor restaurado: {_saved_noise_floor:.0f} (threshold: {self.audio_enhancer.noise_gate_threshold:.0f}) — sin espera de calibración")
 
         # ═══════════════════════════════════════════════════════════════════════
         # FORZAR PIPEWIRE PARA BLUETOOTH: Buscar dispositivo "default" o "pipewire"
@@ -601,44 +620,42 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             return True  # En caso de duda, usar multiplexado
     
     def resample_audio(self, audio_data, ratio):
-        """Resample audio usando scipy o numpy como fallback"""
+        """Resample audio usando scipy.signal.resample_poly (calidad sinc, sin aliasing)"""
         try:
-            # Convertir bytes a numpy array
+            from math import gcd
+            from scipy import signal as scipy_signal
+
             audio_np = np.frombuffer(audio_data, dtype=np.int16)
             original_length = len(audio_np)
-            
-            # Calcular nueva longitud (usar round para evitar errores de redondeo)
-            new_length = int(round(original_length * ratio))
-            
+
             # Si no necesita resampling, retornar original
-            if abs(ratio - 1.0) < 0.01 or new_length == original_length:
+            if abs(ratio - 1.0) < 0.01 or original_length == 0:
                 return audio_data
-            
-            # CASO ESPECIAL: Si new_length es 0 o negativo, retornar audio original
-            if new_length <= 0:
-                log_audio.warning(f"Resampling: new_length={new_length} inválido (ratio={ratio:.3f}), usando original")
+
+            # Convertir ratio a fracción up/down de enteros para resample_poly
+            # Usar denominador 1000 para manejar ratios como 0.5, 2.0, etc.
+            denom = 1000
+            up = int(round(ratio * denom))
+            down = denom
+            common = gcd(up, down)
+            up //= common
+            down //= common
+
+            if up <= 0 or down <= 0:
+                log_audio.warning(f"Resampling: up={up}, down={down} inválidos (ratio={ratio:.3f}), usando original")
                 return audio_data
-            
-            # OPTIMIZACIÓN: Usar siempre numpy (más rápido que scipy para audio en tiempo real)
-            # La interpolación lineal es suficiente para audio de voz (no necesitamos FFT de scipy)
-            old_indices = np.arange(original_length)
-            new_indices = np.linspace(0, original_length - 1, new_length)
-            
-            # Interpolación lineal sobre float32 para precisión
-            resampled = np.interp(new_indices, old_indices, audio_np.astype(np.float32))
-            
-            # Convertir de vuelta a int16 con clipping
-            resampled = np.clip(resampled, -32768, 32767).astype(np.int16)
-            
-            log_audio.debug(f"Resampled: {original_length} → {len(resampled)} samples (ratio={ratio:.3f})")
-            
-            # Verificar que el tamaño sea correcto antes de retornar
-            if len(resampled) != new_length:
-                log_audio.error(f"Resampling size mismatch: expected {new_length}, got {len(resampled)} - usando original")
-                return audio_data
-            
+
+            # resample_poly: interpolación sinc con filtro anti-aliasing automático
+            # Mucho mejor calidad que interpolación lineal para frecuencias de voz
+            resampled_f = scipy_signal.resample_poly(
+                audio_np.astype(np.float32), up, down
+            )
+
+            log_audio.debug(f"Resampled (sinc): {original_length} → {len(resampled_f)} samples (ratio={ratio:.3f}, up={up}, down={down})")
+
+            resampled = np.clip(resampled_f, -32768, 32767).astype(np.int16)
             return resampled.tobytes()
-            
+
         except Exception as e:
             log_audio.error(f"Error en resampling (ratio={ratio:.3f}, input_size={len(audio_data)}): {e}")
             import traceback
@@ -1529,12 +1546,8 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 # termina de reproducirse el audio (no cuando llegan los datos)
                 
                 # Restaurar estado del micrófono
-                if self.echo_canceller:
-                    self.echo_canceller.notify_playback_stopped()
-                    log_aec.debug("Micrófono reactivado (AEC maneja eco residual)")
-                else:
-                    log_audio.debug("Micrófono reactivado")
-                
+                # NOTA: notify_playback_stopped() se llama desde play_audio() cuando
+                # el último chunk REALMENTE se reproduce, no aquí (que es cuando llegan los datos)
                 self.root.after(0, self.update_activity_status, 'idle', '#95a5a6')
                 self.set_volume_level(0)
                 log_ws.info("✅ Audio recibido completo (reproducción puede continuar)")
@@ -1547,6 +1560,80 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 else:
                     # Si fue interrumpido, limpiar buffers
                     self.clear_audio_buffers()
+                    
+            # ══════════════════════════════════════════════════════════════════════
+            # FUNCTION CALLING: Manejo de invocación de tools
+            # ══════════════════════════════════════════════════════════════════════
+            elif event_type == 'response.function_call_arguments.done':
+                # La API solicita ejecutar una función
+                if FUNCTION_TOOLS_AVAILABLE:
+                    call_id = data.get('call_id', '')
+                    function_name = data.get('name', '')
+                    arguments_str = data.get('arguments', '{}')
+                    
+                    log_ws.info(f"🔧 Function call: {function_name}({arguments_str})")
+                    self.root.after(0, self.append_message, "Sistema", f"🔧 Ejecutando: {function_name}...", 'system')
+                    
+                    # Ejecutar la función en un thread para no bloquear
+                    def execute_and_respond():
+                        try:
+                            # Parsear argumentos
+                            arguments = json.loads(arguments_str) if arguments_str else {}
+                            
+                            # Ejecutar la tool
+                            result = execute_tool(function_name, arguments)
+                            
+                            log_ws.info(f"🔧 Resultado: {result[:100]}...")
+                            
+                            # Enviar resultado a la API
+                            function_output = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": result
+                                }
+                            }
+                            
+                            if self.ws and self.connected:
+                                self.ws.send(json.dumps(function_output))
+                                log_ws.debug("📤 Resultado de function enviado a API")
+                                
+                                # Solicitar que la API continúe con la respuesta
+                                response_create = {
+                                    "type": "response.create"
+                                }
+                                self.ws.send(json.dumps(response_create))
+                                log_ws.debug("📤 Solicitando continuación de respuesta")
+                                
+                        except Exception as e:
+                            log_ws.error(f"❌ Error ejecutando function {function_name}: {e}")
+                            # Enviar error a la API
+                            error_output = {
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": call_id,
+                                    "output": json.dumps({"success": False, "error": str(e), "message": f"Error: {e}"})
+                                }
+                            }
+                            if self.ws and self.connected:
+                                self.ws.send(json.dumps(error_output))
+                                self.ws.send(json.dumps({"type": "response.create"}))
+                    
+                    # Ejecutar en thread separado
+                    threading.Thread(target=execute_and_respond, daemon=True).start()
+                else:
+                    log_ws.warning("⚠️ Function call recibido pero tools no disponibles")
+            
+            elif event_type == 'response.output_item.done':
+                # Un item de output terminó (puede ser function_call o message)
+                item = data.get('item', {})
+                item_type = item.get('type', '')
+                
+                if item_type == 'function_call':
+                    function_name = item.get('name', '')
+                    log_ws.debug(f"✅ Function call '{function_name}' completado")
                     
             elif event_type == 'error':
                 error = data.get('error', {})
@@ -1606,19 +1693,27 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             }
         }
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # FUNCTION CALLING: Agregar tools si están disponibles
+        # ═══════════════════════════════════════════════════════════════════════
+        if FUNCTION_TOOLS_AVAILABLE:
+            session_config["session"]["tools"] = get_tools_definitions()
+            session_config["session"]["tool_choice"] = "auto"  # La IA decide cuándo usar tools
+            log.debug(f"Tools configuradas: {len(get_tools_definitions())} funciones")
+        
         # Solo agregar configuración de INPUT de audio si está en modo voz
         if self.voice_mode:
             session_config["session"].update({
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
-                    "model": "whisper-1",
+                    "model": "gpt-4o-transcribe",  # ⭐ Mejor modelo: mayor precisión en español, acentos y ruido
                     "language": "es"  # ⭐ FORZAR ESPAÑOL para transcripción correcta
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.4,           # Más sensible (0.4 detecta voces normales; 0.6 era muy alto)
-                    "prefix_padding_ms": 300,   # Audio previo al habla (ms)
-                    "silence_duration_ms": 600, # Silencio antes de procesar (ms)
+                    "threshold": 0.5,           # Balance: detecta voz atenuada por AEC sin falsos positivos
+                    "prefix_padding_ms": 450,   # Más padding para no perder el inicio de palabras
+                    "silence_duration_ms": 900, # Más tiempo para no cortar oraciones con pausas naturales
                     "create_response": True,
                     "interrupt_response": True
                 },
@@ -1748,7 +1843,14 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         self.recording = False
         self.record_button.config(text="🎤 Iniciar", bg='#e74c3c')
         self.append_message("Sistema", "⏸️ Modo manos libres detenido", 'system')
-        
+
+        # Persistir noise floor calibrado para la próxima sesión (calibración instantánea)
+        if self.audio_enhancer and self.audio_device_manager:
+            nf = self.audio_enhancer.get_calibrated_noise_floor()
+            if nf is not None:
+                self.audio_device_manager.save_noise_floor(nf)
+                log_audio.info(f"✅ Noise floor guardado para próxima sesión: {nf:.0f}")
+
         # Detener actualizaciones periódicas de contexto visual
         self.stop_periodic_vision_updates()
     
@@ -1949,8 +2051,12 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                                 self.mouth_controller.stop_speaking()
                                 log_audio.debug("🔇 Boca detenida (fin de reproducción real)")
                                 is_playing = False
+                            # Notificar al AEC AQUÍ: el altavoz REALMENTE terminó
+                            # (antes se hacía en response.audio.done que llega antes de reproducirse)
+                            if self.echo_canceller:
+                                self.echo_canceller.notify_playback_stopped()
+                                log_aec.debug("🔇 AEC notificado: reproducción real terminada")
                             # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
-                            # Esto evita que se corte el audio antes de terminar
                             import time
                             time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
                             continue
@@ -1965,6 +2071,10 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                                 self.mouth_controller.stop_speaking()
                                 log_audio.debug("🔇 Boca detenida (fin de reproducción real)")
                                 is_playing = False
+                            # Notificar al AEC AQUÍ: el altavoz REALMENTE terminó
+                            if self.echo_canceller:
+                                self.echo_canceller.notify_playback_stopped()
+                                log_aec.debug("🔇 AEC notificado: reproducción real terminada")
                             # IMPORTANTE: Dar tiempo para que el buffer de PyAudio se vacíe completamente
                             import time
                             time.sleep(0.2)  # 200ms para permitir que el buffer interno se reproduzca
