@@ -102,6 +102,37 @@ except ImportError as e:
     FUNCTION_TOOLS_AVAILABLE = False
     log.warning(f"⚠️ Function Tools no disponibles: {e}")
 
+# ══════════════════════════════════════════════════════════════════════════════
+# MEMORIA PERSISTENTE / CONTEXTO FIJO
+# ══════════════════════════════════════════════════════════════════════════════
+# Archivo con información de contexto que FRANK siempre tendrá presente
+PERSISTENT_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "frank_context.txt")
+
+def load_persistent_context() -> str:
+    """
+    Carga el contexto persistente desde el archivo de texto.
+    Este contexto se incluirá en las instrucciones de FRANK.
+    """
+    try:
+        if os.path.exists(PERSISTENT_CONTEXT_FILE):
+            with open(PERSISTENT_CONTEXT_FILE, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+            
+            # Limitar tamaño para no exceder límites de tokens
+            # ~4 chars = 1 token, limitamos a ~2000 tokens de contexto
+            max_chars = 8000
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n[... contexto truncado por tamaño ...]"
+            
+            log.info(f"✅ Contexto persistente cargado: {len(content)} chars desde {PERSISTENT_CONTEXT_FILE}")
+            return content
+        else:
+            log.debug(f"No existe archivo de contexto persistente: {PERSISTENT_CONTEXT_FILE}")
+            return ""
+    except Exception as e:
+        log.warning(f"⚠️ Error cargando contexto persistente: {e}")
+        return ""
+
 load_dotenv()
 
 # Configuración
@@ -295,6 +326,7 @@ class RealtimeGUIChat:
     def _build_conversational_instructions(self):
         """
         Construye instrucciones dinámicas para conversación natural con contexto temporal
+        y memoria persistente
         """
         from datetime import datetime
         import locale
@@ -325,10 +357,26 @@ class RealtimeGUIChat:
         else:
             week_context = f"Es {day_name}"
         
+        # Cargar contexto persistente (información del ISAE Clúster, TecnoAliados, etc.)
+        persistent_context = load_persistent_context()
+        
+        # Construir sección de contexto persistente si existe
+        persistent_section = ""
+        if persistent_context:
+            persistent_section = f"""
+INFORMACIÓN DE CONTEXTO IMPORTANTE (ISAE Clúster Tecnológico y TecnoAliados):
+Esta es información sobre tu entorno, historia y proyectos relacionados. Úsala cuando sea relevante:
+
+{persistent_context}
+
+Cuando te pregunten sobre el ISAE, el Clúster Tecnológico, TecnoAliados, los cursos disponibles o 
+temas relacionados, usa esta información para dar respuestas precisas y contextualizadas.
+"""
+        
         instructions = f"""Tu NOMBRE ES FRANK. Fuiste creado en el Cluster Tecnológico por 2 estudiantes de ingenierías y un ingeniero electrónico. Esta información sobre tu identidad es MUY IMPORTANTE - siempre recuérdala si te preguntan quién eres o quién te creó.
 
 Eres un asistente conversacional amigable y natural. Tu objetivo es hacer que cada interacción se sienta como hablar con un amigo cercano que te escucha atentamente.
-
+{persistent_section}
 REGLA FUNDAMENTAL DE BREVEDAD:
 - Las respuestas DEBEN ser CORTAS por defecto (1-3 oraciones máximo)
 - Solo expande si el usuario EXPLÍCITAMENTE pide más información o una respuesta extensa
