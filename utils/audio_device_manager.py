@@ -4,6 +4,8 @@ Maneja detección, selección y guardado de preferencias de dispositivos de audi
 """
 import json
 import os
+import re
+import subprocess
 from typing import Optional, Dict, List, Tuple
 
 try:
@@ -89,12 +91,161 @@ class AudioDeviceManager:
         except Exception as e:
             print(f"[ERROR] Error obteniendo dispositivos: {e}")
         
+        # Inyectar dispositivos PipeWire (Bluetooth, etc.) no visibles via ALSA puro
+        self._inject_pipewire_devices(devices)
+
         # PRIORIZAR dispositivos físicos (USB, Bluetooth) sobre virtuales
         priority_order = {'usb': 1, 'bluetooth': 2, 'internal': 3, 'unknown': 4, 'hdmi': 5, 'virtual': 6}
         devices["input"].sort(key=lambda d: (priority_order.get(d['device_type'], 999), d['index']))
         devices["output"].sort(key=lambda d: (priority_order.get(d['device_type'], 999), d['index']))
-        
+
         return devices
+
+    def get_pipewire_sinks_sources(self) -> Dict[str, List[Dict]]:
+        """Consulta wpctl para obtener todos los sinks y sources de PipeWire (incluyendo Bluetooth)"""
+        result: Dict[str, List[Dict]] = {"sinks": [], "sources": [], "bt_device_names": set()}
+
+        try:
+            out = subprocess.check_output(
+                ['wpctl', 'status'], text=True, timeout=3, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            return result
+
+        # Primera pasada: encontrar nombres de dispositivos Bluetooth en la sección Devices
+        in_audio = False
+        in_devices = False
+        for line in out.splitlines():
+            stripped = line.strip()
+            if stripped == 'Audio':
+                in_audio = True
+                in_devices = False
+            elif stripped == 'Video':
+                in_audio = False
+            elif in_audio and '─ Devices:' in stripped:
+                in_devices = True
+            elif in_devices and '─ ' in stripped and 'Devices:' not in stripped:
+                in_devices = False
+            elif in_devices and '[bluez5]' in stripped:
+                m = re.search(r'\d+\.\s+(.+?)\s+\[bluez5\]', stripped)
+                if m:
+                    result["bt_device_names"].add(m.group(1).strip())
+
+        # Segunda pasada: parsear Sinks y Sources
+        current_section = None
+        in_audio = False
+        for line in out.splitlines():
+            stripped = line.strip()
+            if stripped == 'Audio':
+                in_audio = True
+            elif stripped == 'Video':
+                in_audio = False
+            if not in_audio:
+                continue
+            if '─ Sinks:' in stripped:
+                current_section = 'sinks'
+            elif '─ Sources:' in stripped:
+                current_section = 'sources'
+            elif any(x in stripped for x in ['─ Filters:', '─ Streams:', '─ Devices:']):
+                current_section = None
+            elif current_section:
+                m = re.match(r'[│\s]*([\*\s])\s*(\d+)\.\s+(.+?)(?:\s+\[vol.*)?$', line)
+                if m and m.group(3).strip():
+                    name = m.group(3).strip()
+                    result[current_section].append({
+                        "id": int(m.group(2)),
+                        "name": name,
+                        "is_default": m.group(1).strip() == '*',
+                        "is_bluetooth": name in result["bt_device_names"]
+                    })
+
+        return result
+
+    def _inject_pipewire_devices(self, devices: Dict[str, List[Dict]]):
+        """Inyecta dispositivos Bluetooth de PipeWire que no son visibles via ALSA directamente"""
+        # Encontrar el índice ALSA del bridge 'pipewire' o 'default' para usarlo como túnel
+        pipewire_out_index = None
+        pipewire_in_index = None
+
+        for dev in devices["output"]:
+            name_l = dev['name'].lower()
+            if 'pipewire' in name_l and pipewire_out_index is None:
+                pipewire_out_index = dev['index']
+            elif 'default' in name_l and pipewire_out_index is None:
+                pipewire_out_index = dev['index']
+
+        for dev in devices["input"]:
+            name_l = dev['name'].lower()
+            if 'pipewire' in name_l and pipewire_in_index is None:
+                pipewire_in_index = dev['index']
+            elif 'default' in name_l and pipewire_in_index is None:
+                pipewire_in_index = dev['index']
+
+        pw = self.get_pipewire_sinks_sources()
+
+        # Inyectar sinks Bluetooth (outputs)
+        for sink in pw.get("sinks", []):
+            if not sink.get("is_bluetooth"):
+                continue  # Solo BT — USB/HDMI ya están en ALSA
+            name = sink["name"]
+            already = any(
+                d["name"] == name
+                for d in devices["output"]
+                if not d.get("via_pipewire")
+            )
+            if not already and pipewire_out_index is not None:
+                devices["output"].append({
+                    "index": pipewire_out_index,
+                    "name": name,
+                    "max_input_channels": 0,
+                    "max_output_channels": 2,
+                    "default_sample_rate": 48000.0,
+                    "is_default_input": False,
+                    "is_default_output": sink.get("is_default", False),
+                    "is_pipewire": True,
+                    "device_type": "bluetooth",
+                    "pipewire_id": sink["id"],
+                    "via_pipewire": True
+                })
+
+        # Inyectar sources Bluetooth (inputs) — útil para mics BT
+        for source in pw.get("sources", []):
+            if not source.get("is_bluetooth"):
+                continue
+            name = source["name"]
+            already = any(
+                d["name"] == name
+                for d in devices["input"]
+                if not d.get("via_pipewire")
+            )
+            if not already and pipewire_in_index is not None:
+                devices["input"].append({
+                    "index": pipewire_in_index,
+                    "name": name,
+                    "max_input_channels": 2,
+                    "max_output_channels": 0,
+                    "default_sample_rate": 48000.0,
+                    "is_default_input": source.get("is_default", False),
+                    "is_default_output": False,
+                    "is_pipewire": True,
+                    "device_type": "bluetooth",
+                    "pipewire_id": source["id"],
+                    "via_pipewire": True
+                })
+
+    def set_pipewire_default(self, node_id: int) -> bool:
+        """Establece un nodo PipeWire como el sink/source por defecto usando wpctl"""
+        try:
+            subprocess.run(
+                ['wpctl', 'set-default', str(node_id)],
+                check=True, timeout=3,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            print(f"[PIPEWIRE] Nodo {node_id} establecido como predeterminado")
+            return True
+        except Exception as e:
+            print(f"[ERROR] No se pudo cambiar el sink/source predeterminado: {e}")
+            return False
     
     def get_device_names(self) -> Tuple[List[str], List[str]]:
         """Obtiene nombres de dispositivos para mostrar en GUI con tipo y estado"""
@@ -116,8 +267,8 @@ class AudioDeviceManager:
         # Dispositivos de entrada (micrófonos)
         for dev in devices["input"]:
             emoji = type_emoji.get(dev["device_type"], '🎤')
-            base_name = dev["name"]
-            
+            base_name = self.get_device_alias(dev["name"]) or dev["name"]
+
             # Truncar nombres muy largos
             if len(base_name) > 40:
                 base_name = base_name[:37] + "..."
@@ -137,8 +288,8 @@ class AudioDeviceManager:
         # Dispositivos de salida (altavoces)
         for dev in devices["output"]:
             emoji = type_emoji.get(dev["device_type"], '🔊')
-            base_name = dev["name"]
-            
+            base_name = self.get_device_alias(dev["name"]) or dev["name"]
+
             # Truncar nombres muy largos
             if len(base_name) > 40:
                 base_name = base_name[:37] + "..."
@@ -164,22 +315,32 @@ class AudioDeviceManager:
         return input_names, output_names
     
     def get_device_index_from_name(self, device_name: str, device_type: str = "input") -> Optional[int]:
-        """Obtiene el índice de un dispositivo desde su nombre mostrado"""
+        """Obtiene el índice PyAudio de un dispositivo desde su nombre mostrado (maneja aliases)"""
+        info = self.get_device_full_info_from_name(device_name, device_type)
+        return info["index"] if info else None
+
+    def get_device_full_info_from_name(self, device_name: str, device_type: str = "input") -> Optional[Dict]:
+        """Obtiene el dict completo de un dispositivo desde su nombre mostrado (maneja aliases)"""
         devices = self.get_devices()
         device_list = devices.get(device_type, [])
-        
-        # Limpiar el nombre (quitar emojis y etiquetas)
-        import re
-        # Remover emojis y etiquetas como [USB], [BLUETOOTH], (Sistema), ⭐, etc.
-        clean_name = re.sub(r'[🔌📶🎙️📺⚙️❓🎤🔊⭐]', '', device_name)
-        clean_name = re.sub(r'\[.*?\]', '', clean_name)  # Remover [USB], [BLUETOOTH]
-        clean_name = re.sub(r'\(.*?\)', '', clean_name)  # Remover (Sistema), (Default)
-        clean_name = clean_name.strip()
-        
+
+        # Limpiar nombre mostrado: quitar emoji/símbolos iniciales y etiquetas de la GUI
+        # 1. Quitar emoji/símbolo inicial no-ASCII (🔌 📶 etc.)
+        clean_name = re.sub(r'^[^\x00-\x7E]+\s*', '', device_name)
+        # 2. Quitar etiquetas de tipo: [USB], [BLUETOOTH], etc.
+        clean_name = re.sub(r'\s*\[.*?\]', '', clean_name)
+        # 3. Quitar etiquetas de estado de la GUI (no quitar "(hw:X,X)" de ALSA)
+        clean_name = re.sub(r'\s+\(Sistema\)', '', clean_name)
+        clean_name = re.sub(r'\s+\(Default\)', '', clean_name)
+        # 4. Quitar símbolos no-ASCII al final (⭐ etc.)
+        clean_name = re.sub(r'[^\x00-\x7E]+$', '', clean_name).strip()
+
         for dev in device_list:
-            if dev["name"].strip() == clean_name:
-                return dev["index"]
-        
+            dev_name = dev["name"].strip()
+            dev_alias = self.get_device_alias(dev_name) or ""
+            if dev_name == clean_name or dev_alias == clean_name:
+                return dev
+
         return None
     
     def auto_detect_best_devices(self) -> Tuple[Optional[int], Optional[int]]:
@@ -224,21 +385,46 @@ class AudioDeviceManager:
         
         return best_input, best_output
     
-    def get_preferred_devices(self) -> Dict[str, Optional[int]]:
-        """Obtiene los dispositivos preferidos guardados"""
+    def get_preferred_devices(self) -> Dict:
+        """Obtiene los dispositivos preferidos guardados (incluye pipewire_id para BT)"""
         return {
             "input": self.config.get("preferred_input_device"),
-            "output": self.config.get("preferred_output_device")
+            "output": self.config.get("preferred_output_device"),
+            "input_pipewire_id": self.config.get("preferred_input_pipewire_id"),
+            "output_pipewire_id": self.config.get("preferred_output_pipewire_id")
         }
     
-    def set_preferred_devices(self, input_index: Optional[int] = None, output_index: Optional[int] = None):
-        """Guarda los dispositivos preferidos"""
+    def set_preferred_devices(self, input_index: Optional[int] = None, output_index: Optional[int] = None,
+                               input_pipewire_id: Optional[int] = None, output_pipewire_id: Optional[int] = None):
+        """Guarda los dispositivos preferidos (incluye pipewire_id para dispositivos BT)"""
         if input_index is not None:
             self.config["preferred_input_device"] = input_index
         if output_index is not None:
             self.config["preferred_output_device"] = output_index
-        
+        if input_pipewire_id is not None:
+            self.config["preferred_input_pipewire_id"] = input_pipewire_id
+        elif input_index is not None:
+            self.config["preferred_input_pipewire_id"] = None  # Reset si no es BT
+        if output_pipewire_id is not None:
+            self.config["preferred_output_pipewire_id"] = output_pipewire_id
+        elif output_index is not None:
+            self.config["preferred_output_pipewire_id"] = None  # Reset si no es BT
+
         self.save_config()
+
+    def set_device_alias(self, device_name: str, alias: str):
+        """Guarda un nombre amigable para un dispositivo (alias visible en la GUI)"""
+        if 'device_aliases' not in self.config:
+            self.config['device_aliases'] = {}
+        if alias.strip():
+            self.config['device_aliases'][device_name] = alias.strip()
+        elif device_name in self.config.get('device_aliases', {}):
+            del self.config['device_aliases'][device_name]
+        self.save_config()
+
+    def get_device_alias(self, device_name: str) -> Optional[str]:
+        """Obtiene el alias de un dispositivo si existe, o None"""
+        return self.config.get('device_aliases', {}).get(device_name)
     
     def get_preferred_device_names(self) -> Tuple[Optional[str], Optional[str]]:
         """Obtiene los nombres de los dispositivos preferidos con tipo"""
@@ -252,16 +438,18 @@ class AudioDeviceManager:
         if prefs["input"] is not None:
             for dev in devices["input"]:
                 if dev["index"] == prefs["input"]:
+                    display = self.get_device_alias(dev['name']) or dev['name']
                     type_label = dev["device_type"].upper()
-                    input_name = f"{dev['name']} [{type_label}]"
+                    input_name = f"{display} [{type_label}]"
                     break
-        
+
         # Buscar nombre del dispositivo de salida
         if prefs["output"] is not None:
             for dev in devices["output"]:
                 if dev["index"] == prefs["output"]:
+                    display = self.get_device_alias(dev['name']) or dev['name']
                     type_label = dev["device_type"].upper()
-                    output_name = f"{dev['name']} [{type_label}]"
+                    output_name = f"{display} [{type_label}]"
                     break
         
         return input_name, output_name
@@ -313,10 +501,14 @@ class AudioDeviceManager:
         default_config = {
             "preferred_input_device": None,
             "preferred_output_device": None,
+            "preferred_input_pipewire_id": None,
+            "preferred_output_pipewire_id": None,
+            "device_aliases": {},
             "input_volume": 1.0,
             "output_volume": 1.0,
             "noise_reduction_enabled": True,
             "agc_enabled": True,
+            "calibrated_noise_floor": None,
             "last_used": None
         }
         
@@ -377,6 +569,16 @@ class AudioDeviceManager:
         
         return supported
     
+    def get_noise_floor(self) -> Optional[float]:
+        """Obtiene el noise floor calibrado persistido de la sesión anterior"""
+        value = self.config.get("calibrated_noise_floor")
+        return float(value) if value is not None else None
+
+    def save_noise_floor(self, noise_floor: float):
+        """Persiste el noise floor calibrado para la próxima sesión (calibración instantánea)"""
+        self.config["calibrated_noise_floor"] = round(noise_floor, 2)
+        self.save_config()
+
     def cleanup(self):
         """Limpia recursos"""
         if self.audio:

@@ -19,7 +19,7 @@ from scipy import signal as scipy_signal
 class AudioEnhancer:
     """Procesador profesional de audio en tiempo real - OPTIMIZADO"""
     
-    def __init__(self, sample_rate=24000):
+    def __init__(self, sample_rate=24000, initial_noise_floor=None):
         self.sample_rate = sample_rate
         
         # AGC (Automatic Gain Control) - OPTIMIZADO para voz clara
@@ -27,7 +27,7 @@ class AudioEnhancer:
         self.current_gain = 1.0
         self.gain_smoothing = 0.9  # Más suave para evitar distorsión
         self.min_gain = 0.8  # Menos reducción para mantener claridad
-        self.max_gain = 6.0  # Amplificación controlada para voces bajas
+        self.max_gain = 4.0  # Amplificación controlada (reducido para no amplificar ruido ambiente)
         
         # Anti-clipping mejorado
         self.clipping_threshold = 31000  # Umbral antes del máximo (32767)
@@ -40,7 +40,13 @@ class AudioEnhancer:
         self.gate_attack = 0.8    # Apertura rápida (80% en 1 frame ~21ms)
         self.gate_release = 0.04   # Cierre muy lento (evita cortar palabras)
         self.gate_state = 1.0     # Empezar abierto, la calibración lo ajustará
-        
+
+        # Restaurar noise floor calibrado de sesión anterior (calibración instantánea)
+        if initial_noise_floor is not None and initial_noise_floor > 0:
+            self.noise_floor = initial_noise_floor
+            self.noise_gate_threshold = max(120, self.noise_floor * 1.6)
+            print(f"[AUDIO] ✅ Noise floor restaurado: {self.noise_floor:.0f} (threshold: {self.noise_gate_threshold:.0f}) — sin espera de calibración")
+
         # Smoothing general
         self.last_output_level = 0
         self.smoothing_factor = 0.75  # Más suave
@@ -52,15 +58,16 @@ class AudioEnhancer:
         # Filtro pasa-banda para voz (300-3400 Hz)
         # OPTIMIZADO: Desactivado por defecto - Whisper ya filtra frecuencias no-vocales
         # Activar solo si hay problemas específicos de ruido de baja/alta frecuencia
-        self.use_bandpass = False  # Desactivado para mejor rendimiento
+        self.use_bandpass = True   # Activado: filtra ruido de baja/alta frecuencia antes del VAD
         self.bandpass_low = 300   # Frecuencia baja (Hz)
         self.bandpass_high = 3400 # Frecuencia alta (Hz)
         self._init_bandpass_filter()
         
         # Double buffering para playback
-        # maxsize=0 = ilimitado: NUNCA descartar chunks de audio
-        # La API envía audio más rápido que tiempo real, el buffer absorbe la diferencia
-        self.playback_buffer = queue.Queue(maxsize=0)
+        # maxsize=300 ≈ 6.4s de audio @ 24kHz/512chunk — previene OOM si el thread de playback muere
+        # Si el buffer se llena, add_to_playback_buffer descarta el chunk más viejo
+        self.playback_buffer = queue.Queue(maxsize=300)
+        self._buffer_overflow_logged = False
         self.buffer_lock = threading.Lock()
     
     def _init_bandpass_filter(self):
@@ -212,20 +219,22 @@ class AudioEnhancer:
         """
         Aplica filtro de pre-énfasis para realzar frecuencias de voz (300-3400 Hz)
         y[n] = x[n] - alpha * x[n-1]
-        Mejora claridad vocal y reduce ruido de bajas frecuencias
+        Mejora claridad vocal y reduce ruido de bajas frecuencias.
+        OPTIMIZADO: Operación vectorizada numpy (50-100x más rápido que loop Python)
         """
         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32)
-        
-        # Aplicar filtro FIR de primer orden
-        emphasized = np.zeros_like(audio_array)
+
+        if len(audio_array) == 0:
+            return audio_array
+
+        # Vectorized: crea shifted array y aplica la resta en batch (sin loop Python)
+        emphasized = np.empty_like(audio_array)
         emphasized[0] = audio_array[0] - self.pre_emphasis_alpha * self.last_sample
-        
-        for i in range(1, len(audio_array)):
-            emphasized[i] = audio_array[i] - self.pre_emphasis_alpha * audio_array[i-1]
-        
+        emphasized[1:] = audio_array[1:] - self.pre_emphasis_alpha * audio_array[:-1]
+
         # Guardar último sample para continuidad entre chunks
         self.last_sample = audio_array[-1]
-        
+
         return emphasized
     
     def apply_bandpass_filter(self, audio_array):
@@ -303,10 +312,24 @@ class AudioEnhancer:
         return audio_array.astype(np.int16).tobytes()
     
     def add_to_playback_buffer(self, audio_chunk):
-        """Agrega audio al buffer de reproducción (thread-safe)"""
+        """Agrega audio al buffer de reproducción (thread-safe, protección de overflow)."""
         with self.buffer_lock:
-            # Queue ilimitada: put() nunca bloquea ni descarta datos
-            self.playback_buffer.put(audio_chunk)
+            if self.playback_buffer.full():
+                # Buffer lleno: thread de playback probablemente muerto o muy lento.
+                # Descartar el chunk más viejo para no bloquear el WebSocket.
+                if not self._buffer_overflow_logged:
+                    print("[AUDIO] ⚠️ Buffer de playback lleno — thread de playback posiblemente muerto")
+                    self._buffer_overflow_logged = True
+                try:
+                    self.playback_buffer.get_nowait()  # Descartar el más viejo
+                except Exception:
+                    pass
+            else:
+                self._buffer_overflow_logged = False
+            try:
+                self.playback_buffer.put_nowait(audio_chunk)
+            except Exception:
+                pass  # En caso extremo, simplemente descartar
     
     def get_from_playback_buffer(self, timeout=0.1):
         """Obtiene audio del buffer de reproducción"""
@@ -322,6 +345,7 @@ class AudioEnhancer:
         self.last_output_level = 0
         self.noise_floor = None
         self.noise_samples.clear()
+        self._buffer_overflow_logged = False
         
         # Resetear filtro pasa-banda
         if self.use_bandpass:
@@ -342,6 +366,10 @@ class AudioEnhancer:
                 except:
                     break
     
+    def get_calibrated_noise_floor(self):
+        """Retorna el noise_floor calibrado actual para persistir entre sesiones"""
+        return self.noise_floor
+
     def get_stats(self):
         """Retorna estadísticas útiles para debugging"""
         return {

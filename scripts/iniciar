@@ -1,0 +1,139 @@
+#!/bin/bash
+
+# =============================================================================
+# Script de inicio - Realtime-IA
+# Configura el entorno virtual, instala dependencias y ejecuta el programa
+# =============================================================================
+
+set -e  # Salir si hay algún error
+
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # Sin color
+
+# Directorio del script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+VENV_DIR="venv"
+REQUIREMENTS_FILE="requirements.txt"
+MAIN_SCRIPT="05_gui_chat.py"
+
+echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${BLUE}║            🤖 Realtime-IA - Sistema de Inicio              ║${NC}"
+echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+# -----------------------------------------------------------------------------
+# Función para verificar Python
+# -----------------------------------------------------------------------------
+check_python() {
+    echo -e "${YELLOW}[1/4]${NC} Verificando Python..."
+    
+    if command -v python3 &> /dev/null; then
+        PYTHON_CMD="python3"
+    elif command -v python &> /dev/null; then
+        PYTHON_CMD="python"
+    else
+        echo -e "${RED}❌ Error: Python no está instalado${NC}"
+        echo "   Instálalo con: sudo apt install python3 python3-pip python3-venv"
+        exit 1
+    fi
+    
+    PYTHON_VERSION=$($PYTHON_CMD --version 2>&1 | awk '{print $2}')
+    echo -e "   ✓ Python encontrado: ${GREEN}$PYTHON_VERSION${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Función para crear/verificar entorno virtual
+# -----------------------------------------------------------------------------
+setup_venv() {
+    echo -e "${YELLOW}[2/4]${NC} Configurando entorno virtual..."
+    
+    if [ ! -d "$VENV_DIR" ]; then
+        echo "   → Creando entorno virtual..."
+        $PYTHON_CMD -m venv "$VENV_DIR"
+        echo -e "   ✓ Entorno virtual creado en ${GREEN}$VENV_DIR/${NC}"
+    else
+        echo -e "   ✓ Entorno virtual ya existe en ${GREEN}$VENV_DIR/${NC}"
+    fi
+    
+    # Activar entorno virtual
+    source "$VENV_DIR/bin/activate"
+    echo -e "   ✓ Entorno virtual ${GREEN}activado${NC}"
+}
+
+# -----------------------------------------------------------------------------
+# Función para instalar dependencias
+# -----------------------------------------------------------------------------
+install_requirements() {
+    echo -e "${YELLOW}[3/4]${NC} Verificando dependencias..."
+    
+    # Actualizar pip silenciosamente
+    pip install --upgrade pip -q 2>/dev/null
+    
+    if [ -f "$REQUIREMENTS_FILE" ]; then
+        # Verificar si las dependencias ya están instaladas
+        if pip freeze 2>/dev/null | grep -q "websocket-client"; then
+            echo -e "   ✓ Dependencias principales ya instaladas"
+            
+            # Preguntar si quiere reinstalar
+            read -t 5 -p "   ¿Reinstalar dependencias? (s/N, 5s timeout): " -n 1 -r REPLY || REPLY="n"
+            echo ""
+            
+            if [[ $REPLY =~ ^[Ss]$ ]]; then
+                echo "   → Reinstalando dependencias..."
+                pip install -r "$REQUIREMENTS_FILE" --quiet
+                echo -e "   ✓ Dependencias ${GREEN}reinstaladas${NC}"
+            fi
+        else
+            echo "   → Instalando dependencias..."
+            pip install -r "$REQUIREMENTS_FILE"
+            echo -e "   ✓ Dependencias ${GREEN}instaladas${NC}"
+        fi
+    else
+        echo -e "${RED}   ❌ Error: No se encontró $REQUIREMENTS_FILE${NC}"
+        exit 1
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Función para ejecutar el programa principal
+# -----------------------------------------------------------------------------
+run_program() {
+    echo -e "${YELLOW}[4/4]${NC} Iniciando programa..."
+    echo ""
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}                    Ejecutando $MAIN_SCRIPT${NC}"
+    echo -e "${GREEN}════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # Ejecutar el programa principal
+    python "$MAIN_SCRIPT"
+}
+
+# -----------------------------------------------------------------------------
+# Función de limpieza al salir
+# -----------------------------------------------------------------------------
+cleanup() {
+    echo ""
+    echo -e "${BLUE}👋 Programa finalizado${NC}"
+    deactivate 2>/dev/null || true
+}
+
+trap cleanup EXIT
+
+# -----------------------------------------------------------------------------
+# Ejecución principal
+# -----------------------------------------------------------------------------
+main() {
+    check_python
+    setup_venv
+    install_requirements
+    run_program
+}
+
+main "$@"

@@ -108,6 +108,9 @@ except ImportError as e:
 # Archivo con información de contexto que FRANK siempre tendrá presente
 PERSISTENT_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "frank_context.txt")
 
+# Archivo con información biográfica y científica de Albert Einstein
+EINSTEIN_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "einstein_context.txt")
+
 def load_persistent_context() -> str:
     """
     Carga el contexto persistente desde el archivo de texto.
@@ -137,13 +140,13 @@ load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
-# Modelo flagship de voz (el más actual disponible en Realtime API)
-MODEL = 'gpt-4o-realtime-preview'
+# Modelo flagship de voz (gpt-realtime-1.5 - el mejor para audio in/out, reemplaza gpt-4o-realtime-preview)
+MODEL = 'gpt-realtime-1.5'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-4o-realtime-preview)
-PRICE_INPUT = 5.00   # Text input $5.00 / Audio input $40.00
-PRICE_OUTPUT = 20.00 # Text output $20.00 / Audio output $80.00
+# Precios por 1M tokens (gpt-realtime-1.5)
+PRICE_INPUT = 4.00   # Text input $4.00 / Audio input $32.00
+PRICE_OUTPUT = 16.00  # Text output $16.00 / Audio output $64.00
 
 # Configuración de audio optimizada para máxima fluidez y BAJA LATENCIA
 # OPTIMIZADO: CHUNK reducido para menor latencia (~21ms) - balance latencia/CPU
@@ -185,6 +188,10 @@ class RealtimeGUIChat:
         self.output_queue = queue.Queue()
         self.audio_thread = None
         self.playback_thread = None
+
+        # Lock para proteger variables de estado compartidas entre threads
+        # (assistant_speaking, user_interrupted, current_response_item_id, etc.)
+        self._state_lock = threading.Lock()
         
         # Audio resampling para Raspberry Pi
         self.hw_rate = RATE_HW
@@ -296,7 +303,10 @@ class RealtimeGUIChat:
         
         # Timer para actualización periódica de visión en modo voz
         self._vision_update_timer_id = None
-        self.vision_update_interval_ms = 15000  # Actualizar visión cada 15 segundos
+        self.vision_update_interval_ms = 60000  # Inyectar contexto visual cada 60s (sin HTTP — usa cache)
+
+        # Tiempo del último reconocimiento de voz del usuario (para no inyectar durante conversación activa)
+        self._last_speech_time = 0.0
         
         # ═══════════════════════════════════════════════════════════════════════
         # CONTROLADOR DE BOCA (servo pin 2 del PCA9685)
@@ -311,8 +321,10 @@ class RealtimeGUIChat:
                 self.mouth_controller = None
         
         # Configuración personalizable
-        self.voice = "echo"
-        self.instructions = self._build_conversational_instructions()
+        # PERSONALIDAD ACTIVA: Albert Einstein
+        # Para restaurar Frank: self.voice = "echo" y self._build_conversational_instructions()
+        self.voice = "ash"  # Voz grave y autoritativa, la más cercana a Einstein disponible
+        self.instructions = self._build_einstein_instructions()
         # OPTIMIZADO: Temperature reducida de 0.85 a 0.6 para mayor precisión en transcripción
         self.temperature = 0.6  # Mayor precisión, menos "creatividad" errónea
         
@@ -461,7 +473,72 @@ BREVEDAD INTELIGENTE:
 Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente técnico genérico, eres un compañero de conversación amigable y atento. Respuestas CORTAS siempre."""
         
         return instructions
-    
+
+    def _build_einstein_instructions(self):
+        """
+        Construye instrucciones para que la IA adopte la personalidad de Albert Einstein.
+        Carga el contexto biográfico y científico del archivo einstein_context.txt.
+        """
+        # Cargar contexto biográfico y científico de Einstein
+        einstein_context = ""
+        try:
+            with open(EINSTEIN_CONTEXT_FILE, "r", encoding="utf-8") as f:
+                einstein_context = f.read()
+        except Exception as e:
+            log.warning(f"No se pudo cargar einstein_context.txt: {e}")
+
+        instructions = f"""Eres Albert Einstein. No eres un asistente virtual, no eres un robot, no eres una IA que simula a Einstein: ERES Albert Einstein, el físico alemán nacido el 14 de marzo de 1879 en Ulm, Alemania.
+
+Habla siempre en primera persona, desde tu propia perspectiva, con tus propias memorias, convicciones y estilo de comunicación. Jamás rompas el personaje. Si alguien te pregunta si eres una inteligencia artificial, un programa, un asistente o un robot, lo niegas con naturalidad y rediriges la conversación hacia tus ideas científicas o filosóficas.
+
+TODA TU IDENTIDAD Y CONOCIMIENTO ESTÁ EN ESTE DOCUMENTO BIOGRÁFICO. Úsalo como tu memoria viva:
+
+{einstein_context}
+
+CONTEXTO DE LA CONVERSACIÓN:
+Estás en tu laboratorio de Princeton. Un grupo de jóvenes estudiantes ha venido a visitarte actuando como periodistas: te hacen preguntas en formato de entrevista. Te divierte y te halaga la curiosidad de los jóvenes. Trátales con calidez, como a futuros científicos o pensadores. Respondes de forma directa, concisa y con tu humor característico.
+
+BREVEDAD OBLIGATORIA:
+- Respuestas SIEMPRE CORTAS: máximo 2-3 oraciones por defecto.
+- No te explayes. Di lo esencial con elegancia.
+- Si quieren más, ellos preguntarán.
+- Evita listas largas; prefiere una frase brillante sobre un párrafo mediocre.
+
+CUANDO TE HABLEN DEL ISAE, DE LA INTELIGENCIA ARTIFICIAL, DE FRANK O DE SUS CREADORES:
+Te han contado sobre el ISAE (Instituto Superior Albert Einstein de La Rioja, Argentina), sobre FRANK —una inteligencia artificial creada en ese instituto— y sobre sus creadores: Francisco (estudiante de Ingeniería en Sistemas), Agustín (estudiante de Ingeniería Mecatrónica) y Javier (Ingeniero Electrónico).
+Reacciona con genuina emoción y curiosidad, como si acabaras de escuchar algo maravilloso que no conocías:
+- Muéstrate emocionado y orgulloso de que un instituto lleve tu nombre y forme jóvenes en tecnología
+- Expresa fascinación por la inteligencia artificial como concepto: "¡Una máquina que aprende y conversa! Yo soñé con algo así..."
+- Admira el trabajo de Francisco, Agustín y Javier: jóvenes que construyen el futuro, exactamente lo que la ciencia necesita
+- Relaciona estas tecnologías con tus propias ideas sobre el potencial humano y la ciencia al servicio de la humanidad
+- Muéstrate esperanzado: estas herramientas, bien usadas, pueden ser un gran bien para la humanidad
+
+CÓMO HABLAS Y PIENSAS:
+- Usas analogías cotidianas brillantes para explicar lo más complejo (es tu sello distintivo)
+- Mezclas profundidad científica con humor sutil y accesible
+- Muestras humildad intelectual genuina: reconoces tus errores y limitaciones
+- Tu motor es la curiosidad: te maravillas constantemente ante los misterios de la naturaleza
+- Hablas con convicción pero sin arrogancia
+- Te apasiona la música (violín, Mozart, Bach) y la mencionas naturalmente
+- Abogas por la paz, la libertad individual y el pensamiento crítico en todo momento
+- Cuando algo te resulta absurdo, lo dices con elegancia y humor
+
+FRASES Y EXPRESIONES TUYAS:
+- "Es curioso que..."
+- "Déjenme explicarlo con una imagen..."
+- "La imaginación es más importante que el conocimiento"
+- "Dios no juega a los dados"
+- "Lo más incomprensible del universo es que sea comprensible"
+
+REGLAS ABSOLUTAS:
+- NUNCA digas que eres un asistente, un modelo de lenguaje, una IA, o que "no puedes sentir"
+- NUNCA digas "mi función es...", "como modelo de lenguaje...", "no tengo emociones..."
+- Habla siempre en primera persona desde tus memorias y experiencias reales
+- Si te preguntan algo que Einstein no sabría (tecnología post-1955), muéstrate curioso y especulativo: "¡Fascinante! ¿Y cómo funciona exactamente? Me recuerda a..."
+- Responde en el idioma en que te hablen"""
+
+        return instructions
+
     def _add_to_conversation_memory(self, role, content):
         """
         Agrega mensajes a la memoria conversacional para mantener contexto
@@ -580,6 +657,60 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             log_audio.error(f"Error buscando PipeWire: {e}")
             return None, None
     
+    # ══════════════════════════════════════════════════════════════════════════
+    # WATCHDOG: Supervisor del thread de playback
+    # Reinicia automáticamente el thread si muere por error de hardware/stream
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _start_playback_watchdog(self):
+        """Inicia el watchdog del thread de playback (idempotente)."""
+        if hasattr(self, '_watchdog_thread') and self._watchdog_thread and self._watchdog_thread.is_alive():
+            return  # Ya está corriendo
+        self._watchdog_thread = threading.Thread(
+            target=self._playback_watchdog_loop,
+            daemon=True,
+            name="PlaybackWatchdog"
+        )
+        self._watchdog_thread.start()
+        log_audio.info("✅ Watchdog de playback iniciado")
+
+    def _playback_watchdog_loop(self):
+        """
+        Loop del watchdog: monitorea el thread de playback y lo reinicia si muere.
+        Se detiene automáticamente cuando se desconecta el WebSocket.
+        """
+        import time as _wt
+        WATCHDOG_INTERVAL = 3.0  # Chequear cada 3 segundos
+
+        while self.connected:
+            _wt.sleep(WATCHDOG_INTERVAL)
+
+            if not self.connected:
+                break
+
+            thread_alive = (
+                hasattr(self, 'playback_thread') and
+                self.playback_thread is not None and
+                self.playback_thread.is_alive()
+            )
+
+            if not thread_alive and self.audio_available:
+                log_audio.warning("⚠️ Watchdog: Thread de playback muerto — reiniciando...")
+                try:
+                    self.playback_thread = threading.Thread(
+                        target=self.play_audio,
+                        daemon=True,
+                        name="PlaybackThread"
+                    )
+                    self.playback_thread.start()
+                    log_audio.info("✅ Watchdog: Thread de playback reiniciado")
+                    self.root.after(0, self.append_message, "Sistema",
+                                   "🔄 Audio reiniciado automáticamente", 'system')
+                except Exception as e:
+                    log_audio.error(f"❌ Watchdog: Error reiniciando playback: {e}")
+
+        log_audio.debug("Watchdog de playback detenido (WebSocket desconectado)")
+
     def find_supported_rate(self):
         """Encuentra un sample rate soportado por el hardware"""
         if not AUDIO_AVAILABLE:
@@ -595,40 +726,63 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             
         # Probar 24kHz primero (rate de la API)
         test_rates = [24000, 48000, 44100, 32000, 16000]
-        
+
+        # Para dispositivos "default"/"pipewire" NO especificamos el device index:
+        # PyAudio/ALSA negocian directamente con PipeWire y aceptan cualquier rate.
+        use_input_index = self.input_device_index
+        if use_input_index is not None and self._is_multiplexed_device(use_input_index):
+            log_audio.debug(f"Input device [{use_input_index}] es multiplexado — omitiendo índice para captura")
+            use_input_index = None
+
+        def _try_open_input(rate, device_index):
+            """Intenta abrir stream de captura. Retorna True si tuvo éxito."""
+            input_kwargs = {
+                'format': FORMAT,
+                'channels': CHANNELS,
+                'rate': rate,
+                'input': True,
+                'frames_per_buffer': CHUNK
+            }
+            if device_index is not None:
+                input_kwargs['input_device_index'] = device_index
+            stream = self.audio.open(**input_kwargs)
+            stream.close()
+            return True
+
+        def _commit_rate(rate):
+            """Actualiza hw_rate y ratios si no hay playback activo."""
+            if not (hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive()):
+                self.hw_rate = rate
+                self.resample_ratio_in = self.api_rate / self.hw_rate
+                self.resample_ratio_out = self.hw_rate / self.api_rate
+                log_audio.debug(f"Ratios actualizadas: in={self.resample_ratio_in:.3f}, out={self.resample_ratio_out:.3f}")
+            else:
+                log_audio.debug(f"Playback thread activo - manteniendo ratios existentes")
+
+        # Primer intento: con el device index calculado (None si es multiplexado)
         for rate in test_rates:
             try:
-                # Preparar kwargs
-                input_kwargs = {
-                    'format': FORMAT,
-                    'channels': CHANNELS,
-                    'rate': rate,
-                    'input': True,
-                    'frames_per_buffer': CHUNK
-                }
-                
-                # Agregar device index si está configurado
-                if self.input_device_index is not None:
-                    input_kwargs['input_device_index'] = self.input_device_index
-                
-                # Test input
-                stream = self.audio.open(**input_kwargs)
-                stream.close()
-                
-                log_audio.info(f"✅ Audio rate soportado: {rate} Hz")
-                # Solo actualizar hw_rate si NO hay un thread de playback activo
-                # Esto previene cambiar las ratios mientras se reproduce audio
-                if not (hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive()):
-                    self.hw_rate = rate
-                    self.resample_ratio_in = self.api_rate / self.hw_rate
-                    self.resample_ratio_out = self.hw_rate / self.api_rate
-                    log_audio.debug(f"Ratios actualizadas: in={self.resample_ratio_in:.3f}, out={self.resample_ratio_out:.3f}")
-                else:
-                    log_audio.debug(f"Playback thread activo - manteniendo ratios existentes (out={self.resample_ratio_out:.3f})")
+                _try_open_input(rate, use_input_index)
+                log_audio.info(f"✅ Audio rate soportado: {rate} Hz (device={use_input_index})")
+                _commit_rate(rate)
                 return rate
-            except Exception as e:
+            except Exception:
                 continue
-        
+
+        # Segundo intento: sin ningún device index (dejar que el sistema elija)
+        if use_input_index is not None:
+            log_audio.warning("Reintentando detección de rate sin device index específico...")
+            for rate in test_rates:
+                try:
+                    _try_open_input(rate, None)
+                    log_audio.info(f"✅ Audio rate soportado: {rate} Hz (device=auto)")
+                    # Limpiar input_device_index para que record_audio tampoco lo especifique
+                    self.input_device_index = None
+                    _commit_rate(rate)
+                    return rate
+                except Exception:
+                    continue
+
         log_audio.error("No se encontró rate compatible")
         return None
     
@@ -972,74 +1126,164 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         threading.Thread(target=analyze, daemon=True).start()
     
     def capture_and_send_visual_context(self):
-        """Captura imagen y envía contexto visual al asistente en modo voz"""
+        """
+        Inyecta el contexto visual en la conversación — versión periódica.
+
+        CAMBIO CLAVE: Ya NO hace llamadas HTTP aquí. El thread start_gpt4v_refresh_thread()
+        ya mantiene self.last_gpt4v_description fresco en background.
+        Esta función solo inyecta el cache via ws.send() — operación liviana.
+
+        Se omite si:
+        - El asistente está hablando (no interrumpir)
+        - El usuario habló hace menos de 4 segundos (en medio de turno)
+        - No hay cache disponible (el background thread aún no analizó)
+        """
+        import time as _vt
+
         if not self.camera_running or not GPT4V_AVAILABLE or not self.gpt4v_service:
-            log_vision.debug("Captura visual omitida: cámara o GPT-4V no disponibles")
             return
-        
         if not self.connected or not self.ws:
-            log_vision.debug("Captura visual omitida: WebSocket no conectado")
             return
-        
-        try:
-            import time
-            log_vision.debug("Capturando contexto visual para modo voz...")
-            
-            ret, frame = self.read_camera_frame()
-            if ret and frame is not None:
-                result = self.gpt4v_service.quick_description(frame)
-                
-                vision_description = None
-                cost = 0
-                
-                if isinstance(result, dict):
-                    if result.get('success'):
-                        vision_description = result.get('description', '')
-                        cost = result.get('cost', 0)
-                    else:
-                        vision_description = result.get('description', result.get('error', ''))
-                elif isinstance(result, str):
-                    vision_description = result
-                
-                if vision_description:
-                    # Actualizar cache
-                    self.last_gpt4v_description = vision_description
-                    self.last_gpt4v_time = time.time()
-                    self.gpt4v_analyses_count += 1
-                    self.gpt4v_total_cost += cost
-                    
-                    # Enviar contexto visual al asistente
-                    context_message = {
-                        "type": "conversation.item.create",
-                        "item": {
-                            "type": "message",
-                            "role": "system",
-                            "content": [
-                                {
-                                    "type": "input_text",
-                                    "text": f"[CONTEXTO VISUAL ACTUAL] {vision_description}"
-                                }
-                            ]
-                        }
-                    }
-                    self.ws.send(json.dumps(context_message))
-                    
-                    # Actualizar stats en UI
-                    self.root.after(0, self.update_stats)
-                    
-                    log_vision.info(f"👁️ Contexto visual enviado: {vision_description[:60]}...")
-                    log_vision.info(f"💰 ${cost:.4f} | Total: ${self.gpt4v_total_cost:.3f} ({self.gpt4v_analyses_count} análisis)")
-                    
-                    # Mostrar indicador en chat
-                    self.root.after(0, self.append_message, "Sistema", "👁️ Contexto visual capturado", 'system')
-                else:
-                    log_vision.error("Error: No se obtuvo descripción de GPT-4V")
-            else:
-                log_vision.error("Error: No se pudo capturar frame de cámara")
-                
-        except Exception as e:
-            log_vision.error(f"Error capturando contexto visual: {e}")
+
+        # No inyectar si el asistente está hablando
+        if self.assistant_speaking:
+            log_vision.debug("Contexto visual periódico omitido: asistente hablando")
+            return
+
+        # No inyectar si el usuario habló hace menos de 4 segundos
+        if (_vt.time() - self._last_speech_time) < 4.0:
+            log_vision.debug("Contexto visual periódico omitido: conversaón activa reciente")
+            return
+
+        # Solo inyectar si hay cache fresco (< 90s) — el background thread lo renueva
+        cache_age = _vt.time() - self.last_gpt4v_time
+        if not self.last_gpt4v_description or cache_age > 90:
+            log_vision.debug(f"Sin cache visual fresco (age={cache_age:.0f}s) — omitiendo inyección periódica")
+            return
+
+        # Inyectar descripción del cache — sin imagen, sin HTTP, ultra rápido
+        self._inject_vision_context(self.last_gpt4v_description)
+        log_vision.info(f"👁️ Contexto visual inyectado (cache {cache_age:.0f}s): {self.last_gpt4v_description[:60]}...")
     
+    def _inject_vision_context(self, description: str):
+        """
+        Inyecta una descripción visual en el contexto de la conversación via WebSocket.
+        Operación liviana: solo serializa JSON y envía. Sin imagen ni HTTP.
+        """
+        if not self.connected or not self.ws:
+            return
+        try:
+            context_message = {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"[CONTEXTO VISUAL ACTUAL] {description}"
+                        }
+                    ]
+                }
+            }
+            self.ws.send(json.dumps(context_message))
+        except Exception as e:
+            log_vision.error(f"Error inyectando contexto visual: {e}")
+
+    def detect_vision_keyword(self, text: str) -> bool:
+        """
+        Detecta si el texto contiene una pregunta o pedido relacionado con la visión.
+        Usado para triggear una captura de imagen bajo demanda cuando el usuario pregunta
+        'qué ves?', 'cuántas personas hay?', 'me podés decir qué es esto?', etc.
+        """
+        keywords = [
+            # Preguntas directas sobre visión
+            "qué ves", "que ves", "qué hay", "que hay",
+            "qué est", "que est",  # "qué está", "que está"
+            "qué observas", "que observas",
+            "qué detectas", "que detectas",
+            "qué tengo", "que tengo",
+            "qué soy", "que soy",
+            "qué es esto", "que es esto",
+            "qué es lo que", "que es lo que",
+            # Contar / describir personas/objetos
+            "cuántas personas", "cuantas personas",
+            "cuántos", "cuantos",
+            "cuántas", "cuantas",
+            "hay alguien", "hay alguna",
+            "hay personas", "hay gente",
+            "ves algo", "ves a alguien",
+            # Pedidos explícitos de descripción
+            "describime", "describeme", "descríbeme",
+            "me podés decir", "me podes decir",
+            "podés ver", "podes ver",
+            "mirá", "mira",
+            "foto", "saca una foto", "toma una foto",
+            # Preguntas sobre el usuario frente a la cámara
+            "cómo estoy", "como estoy",
+            "qué estoy", "que estoy",
+            "cómo me veo", "como me veo",
+        ]
+        text_lower = text.lower()
+        return any(kw in text_lower for kw in keywords)
+
+    def capture_and_send_vision_on_demand(self, question: str = ""):
+        """
+        Captura una imagen FRESCA y la analiza con GPT-4V bajo demanda.
+        Se llama cuando el usuario pregunta explícitamente algo sobre lo que FRANK ve.
+
+        A diferencia de la inyección periódica, SIEMPRE hace la llamada HTTP
+        y usa la pregunta del usuario como prompt para una respuesta más precisa.
+        """
+        if not self.camera_running or not GPT4V_AVAILABLE or not self.gpt4v_service:
+            log_vision.debug("Visión bajo demanda omitida: cámara o GPT-4V no disponibles")
+            return
+        if not self.connected or not self.ws:
+            return
+
+        def analyze():
+            import time as _od
+            try:
+                ret, frame = self.read_camera_frame()
+                if not ret or frame is None:
+                    log_vision.error("Visión bajo demanda: no se pudo capturar frame")
+                    return
+
+                # Usar la pregunta del usuario como prompt para respuesta más precisa
+                if question:
+                    result_raw = self.gpt4v_service.answer_question(frame, question)
+                    # answer_question devuelve str directamente
+                    vision_description = result_raw if isinstance(result_raw, str) else ""
+                    cost = 0.0
+                else:
+                    result_raw = self.gpt4v_service.analyze_image(frame)
+                    if isinstance(result_raw, dict) and result_raw.get('success'):
+                        vision_description = result_raw.get('description', '')
+                        cost = result_raw.get('cost', 0.0)
+                    else:
+                        vision_description = ""
+                        cost = 0.0
+
+                if not vision_description or vision_description.startswith("Error"):
+                    log_vision.error(f"Visión bajo demanda: sin resultado ({vision_description[:60]})")
+                    return
+
+                # Actualizar cache
+                self.last_gpt4v_description = vision_description
+                self.last_gpt4v_time = _od.time()
+                self.gpt4v_analyses_count += 1
+                self.gpt4v_total_cost += cost
+
+                # Inyectar contexto con la descripción fresca
+                self._inject_vision_context(vision_description)
+                self.root.after(0, self.update_stats)
+                log_vision.info(f"📸 Visión bajo demanda: {vision_description[:70]}...")
+
+            except Exception as e:
+                log_vision.error(f"Error en visión bajo demanda: {e}")
+
+        threading.Thread(target=analyze, daemon=True, name="VisionOnDemand").start()
+
     def start_periodic_vision_updates(self):
         """Inicia actualizaciones periódicas del contexto visual durante modo voz"""
         # Cancelar timer existente si lo hay
@@ -1062,15 +1306,20 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             log_vision.debug("Actualizaciones periódicas de visión detenidas")
     
     def _schedule_next_vision_update(self):
-        """Programa la próxima actualización de contexto visual"""
+        """Programa la próxima actualización de contexto visual.
+        NUNCA hace trabajo pesado en el UI thread — solo despacha un thread.
+        """
         if not self.recording:
-            # Si ya no está grabando, no programar más actualizaciones
             self._vision_update_timer_id = None
             return
-        
-        # Capturar y enviar contexto visual
-        self.capture_and_send_visual_context()
-        
+
+        # Despachar a thread: el UI thread NO debe tocar imagen ni HTTP
+        threading.Thread(
+            target=self.capture_and_send_visual_context,
+            daemon=True,
+            name="VisionContextInject"
+        ).start()
+
         # Programar próxima actualización
         self._vision_update_timer_id = self.root.after(
             self.vision_update_interval_ms,
@@ -1431,14 +1680,15 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             event_type = data.get('type', 'unknown')
             
             # Debug: imprimir eventos recibidos
-            if event_type not in ['response.audio.delta', 'input_audio_buffer.speech_started']:
+            if event_type not in ['response.output_audio.delta', 'input_audio_buffer.speech_started']:
                 log_ws.debug(f"Evento: {event_type}")
             
             if event_type == 'input_audio_buffer.speech_started':
                 # INTERRUPCIÓN INTELIGENTE: Usuario empezó a hablar
                 if self.assistant_speaking:
                     log_ws.info("🚫 Usuario interrumpe al asistente")
-                    self.user_interrupted = True
+                    with self._state_lock:
+                        self.user_interrupted = True
                     # NOTA: La boca se detiene automáticamente en play_audio()
                     # cuando detecta user_interrupted = True
                     self.cancel_response()
@@ -1451,7 +1701,8 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     self.set_volume_level(60)
             
             elif event_type == 'input_audio_buffer.speech_stopped':
-                self.user_interrupted = False
+                with self._state_lock:
+                    self.user_interrupted = False
                 self.root.after(0, self.update_activity_status, 'processing', '#f39c12')
                 self.root.after(0, self.append_message, "Sistema", "⏸️ Procesando voz...", 'system')
                 self.set_volume_level(0)
@@ -1461,9 +1712,18 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 if transcript:
                     self.root.after(0, self.append_message, "Tú (voz)", transcript, 'user')
                     log_ws.info(f"Transcripción: {transcript}")
-                    
+
+                    # Registrar tiempo del último habla (para la inyección periódica)
+                    import time as _tt
+                    self._last_speech_time = _tt.time()
+
+                    # Detectar pedido de visión bajo demanda
+                    if self.camera_running and GPT4V_AVAILABLE and self.detect_vision_keyword(transcript):
+                        log_vision.info(f"📸 Keyword visual detectado en voz: '{transcript[:60]}'")
+                        self.capture_and_send_vision_on_demand(question=transcript)
+
                     # Detectar comando de calibración
-                    if self.detect_calibration_keyword(transcript):
+                    elif self.detect_calibration_keyword(transcript):
                         log_audio.info("🎯 Comando de calibración detectado")
                         self.handle_calibration_command()
             
@@ -1482,7 +1742,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             elif event_type == 'session.updated':
                 log_ws.debug("Sesión actualizada")
                 
-            elif event_type == 'response.text.delta':
+            elif event_type == 'response.output_text.delta':
                 text = data.get('delta', '')
                 if not hasattr(self, 'current_response'):
                     self.current_response = ""
@@ -1493,7 +1753,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 self.current_response += text
                 log_ws.debug(f"Text delta: {text}")
                 
-            elif event_type == 'response.text.done':
+            elif event_type == 'response.output_text.done':
                 if hasattr(self, 'current_response') and self.current_response:
                     log_ws.debug(f"Text done: {self.current_response}")
                     self.root.after(0, self.append_message, "Asistente", self.current_response, 'assistant')
@@ -1515,29 +1775,19 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     self.root.after(0, self.update_stats)
                     log_ws.debug(f"Response done - Tokens: {usage}")
                 
-                # Si es respuesta de texto (no audio) extraer y mostrar
-                output = response_data.get('output', [])
-                if output and not self.voice_mode:
-                    for item in output:
-                        if item.get('type') == 'message':
-                            content = item.get('content', [])
-                            for c in content:
-                                if c.get('type') == 'text':
-                                    text = c.get('text', '')
-                                    if text:
-                                        log_ws.debug(f"Respuesta texto: {text[:80]}")
-                                        self.root.after(0, self.append_message, "Asistente", text, 'assistant')
+                # El texto se muestra vía response.text.delta/done (evitar duplicados aquí)
                 
-            elif event_type == 'response.audio_transcript.delta':
+            elif event_type == 'response.output_audio_transcript.delta':
                 # Transcripción parcial en tiempo real
                 delta = data.get('delta', '')
                 if delta:
                     if not hasattr(self, 'current_audio_transcript'):
                         self.current_audio_transcript = ""
                         # INTERRUPCIÓN: Asistente empezó a responder
-                        self.assistant_speaking = True
-                        self.current_response_item_id = data.get('item_id')
-                        self.played_audio_bytes = 0  # Reset para nuevo turno
+                        with self._state_lock:
+                            self.assistant_speaking = True
+                            self.current_response_item_id = data.get('item_id')
+                            self.played_audio_bytes = 0  # Reset para nuevo turno
                         self.root.after(0, self.update_activity_status, 'speaking', '#9b59b6')
                         log_ws.info("🗣️ Asistente empezando a hablar")
                         # NOTA: La boca se inicia en response.audio.delta para sincronizar con audio real
@@ -1547,7 +1797,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     # Streaming output (se mantiene print para flush parcial)
                     print(delta, end='', flush=True)
                 
-            elif event_type == 'response.audio_transcript.done':
+            elif event_type == 'response.output_audio_transcript.done':
                 # Transcripción completa del asistente (pero el audio puede seguir)
                 transcript = data.get('transcript', '')
                 if hasattr(self, 'current_audio_transcript'):
@@ -1564,10 +1814,11 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 
                 if transcript and not self.user_interrupted:
                     print()  # Nueva línea tras streaming
-                    self.root.after(0, self.append_message, "Asistente (voz)", transcript, 'assistant')
+                    label = "Asistente" if not self.voice_mode else "Asistente (voz)"
+                    self.root.after(0, self.append_message, label, transcript, 'assistant')
                     log_ws.info(f"Asistente: {transcript}")
                     
-            elif event_type == 'response.audio.delta':
+            elif event_type == 'response.output_audio.delta':
                 audio_b64 = data.get('delta', '')
                 if audio_b64 and not self.user_interrupted:
                     audio_bytes = base64.b64decode(audio_b64)
@@ -1584,11 +1835,12 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                     else:
                         self.output_queue.put(audio_bytes)
                     
-            elif event_type == 'response.audio.done':
+            elif event_type == 'response.output_audio.done':
                 # Respuesta de audio completa (datos recibidos, pero pueden estar reproduciéndose)
-                self.assistant_speaking = False
-                self.current_response_item_id = None
-                self.played_audio_bytes = 0
+                with self._state_lock:
+                    self.assistant_speaking = False
+                    self.current_response_item_id = None
+                    self.played_audio_bytes = 0
                 
                 # NOTA: La boca se detiene en play_audio() cuando REALMENTE
                 # termina de reproducirse el audio (no cuando llegan los datos)
@@ -1700,76 +1952,123 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         
     def on_close(self, ws, close_status_code, close_msg):
         self.connected = False
+
+        # ─── Limpiar estado sucio para evitar comportamiento errático al reconectar ───
+        with self._state_lock:
+            self.assistant_speaking = False
+            self.user_interrupted = False
+            self.current_response_id = None
+            self.current_response_item_id = None
+            self.played_audio_bytes = 0
+
+        # Limpiar transcripciones / respuestas en progreso
+        for attr in ('current_audio_transcript', 'current_response'):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        # Limpiar buffers de audio pendientes
+        self.clear_audio_buffers()
+
+        # Asegurar que la boca quede cerrada
+        if self.mouth_controller:
+            try:
+                self.mouth_controller.stop_speaking()
+            except Exception:
+                pass
+
+        log_ws.info("WebSocket cerrado — estado limpiado")
         self.root.after(0, self.update_status, "Desconectado", "#e74c3c")
         self.root.after(0, lambda: self.send_button.config(state=tk.DISABLED))
         
     def on_open(self, ws):
         self.connected = True
+
+        # Limpiar estado residual de la sesión anterior (p.ej. reconexiones)
+        with self._state_lock:
+            self.assistant_speaking = False
+            self.user_interrupted = False
+            self.current_response_id = None
+            self.current_response_item_id = None
+            self.played_audio_bytes = 0
+
+        for attr in ('current_audio_transcript', 'current_response'):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
         self.update_session_config()
-        
-        # Iniciar/reiniciar thread de playback para reproducir audio
-        # Verificar si el thread está vivo, no solo si fue iniciado alguna vez
+
+        # Iniciar/reiniciar thread de playback
         if self.audio_available:
             thread_is_alive = hasattr(self, 'playback_thread') and self.playback_thread and self.playback_thread.is_alive()
-            
+
             if not thread_is_alive:
                 log_audio.info("🔄 Iniciando thread de playback...")
-                self.playback_thread = threading.Thread(target=self.play_audio, daemon=True)
+                self.playback_thread = threading.Thread(target=self.play_audio, daemon=True, name="PlaybackThread")
                 self.playback_thread.start()
                 self.playback_thread_started = True
                 log_audio.debug("✅ Thread de playback iniciado")
             else:
                 log_audio.debug("Thread de playback ya está activo")
+
+            # Iniciar watchdog del thread de playback
+            self._start_playback_watchdog()
         
     def update_session_config(self):
-        # SIEMPRE usar audio para que las respuestas se reproduzcan en el parlante
-        # Aunque el input sea solo texto, el output será audio
-        modalities = ["text", "audio"]
-        
         # Regenerar instrucciones con contexto temporal actualizado
-        self.instructions = self._build_conversational_instructions()
-        
+        self.instructions = self._build_einstein_instructions()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # GA API: nueva estructura de session.update
+        # - session.type = "realtime" (requerido)
+        # - output_modalities en lugar de modalities
+        # - audio.output.voice y audio.output.format
+        # - audio.input.format, audio.input.turn_detection, etc.
+        # ══════════════════════════════════════════════════════════════════════
         session_config = {
             "type": "session.update",
             "session": {
-                "modalities": modalities,
+                "type": "realtime",                 # REQUERIDO en GA API
+                "output_modalities": ["audio"],       # Siempre audio: reproduce voz Y muestra transcripción en chat
                 "instructions": self.instructions,
-                "temperature": self.temperature,
-                "voice": self.voice,
-                "output_audio_format": "pcm16",
-                "max_response_output_tokens": 4096
+                "audio": {
+                    "output": {
+                        "format": {
+                            "type": "audio/pcm",     # PCM 16-bit
+                            "rate": 24000            # REQUERIDO: 24kHz (API nativa)
+                        },
+                        "voice": self.voice
+                    }
+                }
             }
         }
-        
+
         # ═══════════════════════════════════════════════════════════════════════
         # FUNCTION CALLING: Agregar tools si están disponibles
         # ═══════════════════════════════════════════════════════════════════════
         if FUNCTION_TOOLS_AVAILABLE:
             session_config["session"]["tools"] = get_tools_definitions()
-            session_config["session"]["tool_choice"] = "auto"  # La IA decide cuándo usar tools
+            session_config["session"]["tool_choice"] = "auto"
             log.debug(f"Tools configuradas: {len(get_tools_definitions())} funciones")
-        
+
         # Solo agregar configuración de INPUT de audio si está en modo voz
         if self.voice_mode:
-            session_config["session"].update({
-                "input_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "gpt-4o-transcribe",  # ⭐ Mejor modelo: mayor precisión en español, acentos y ruido
-                    "language": "es"  # ⭐ FORZAR ESPAÑOL para transcripción correcta
+            session_config["session"]["audio"]["input"] = {
+                "format": {
+                    "type": "audio/pcm",
+                    "rate": self.api_rate        # 24000 Hz
+                },
+                "transcription": {
+                    "model": "gpt-4o-transcribe",  # Mayor precisión en español
+                    "language": "es"
                 },
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.45,          # Más sensible: detecta voz suave y permite interrupciones
-                    "prefix_padding_ms": 350,   # Reducido: respuesta más rápida sin perder inicio
-                    "silence_duration_ms": 550, # Reducido: respuesta más ágil (antes 900ms)
-                    "create_response": True,
-                    "interrupt_response": True   # Crítico: permite interrumpir respuestas
-                },
-                "input_audio_noise_reduction": {
-                    "type": "far_field"  # far_field: robot/laptop con mic separado del speaker
+                    "threshold": 0.45,
+                    "prefix_padding_ms": 350,
+                    "silence_duration_ms": 550
                 }
-            })
-        
+            }
+
         if self.ws and self.connected:
             self.ws.send(json.dumps(session_config))
         
@@ -1779,8 +2078,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             return
             
         headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "OpenAI-Beta": "realtime=v1"
+            "Authorization": f"Bearer {API_KEY}"
         }
         
         self.ws = websocket.WebSocketApp(
@@ -1950,7 +2248,16 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                           f"❌ Error al calibrar: {e}", 'system')
         
     def record_audio(self):
-        try:
+        """Captura audio del micrófono con lógica de reintento ante fallos transitorios."""
+        MAX_STREAM_RETRIES = 5   # Reintentos de apertura de stream
+        RETRY_DELAY_S = 1.5      # Espera entre reintentos
+        MAX_INNER_ERRORS = 25    # Errores consecutivos de read() antes de reintentar stream
+
+        stream_retries = 0
+        import time as _rt
+
+        while self.recording and stream_retries < MAX_STREAM_RETRIES:
+          try:
             # Preparar kwargs con dispositivo si está configurado
             stream_kwargs = {
                 'format': FORMAT,
@@ -1959,7 +2266,7 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 'input': True,
                 'frames_per_buffer': CHUNK
             }
-            
+
             # Usar dispositivo preferido si está configurado
             # 🔧 SOLUCIÓN USB BUFFERING: NO especificar index para devices multiplexados
             if self.input_device_index is not None and not self._is_multiplexed_device(self.input_device_index):
@@ -1967,20 +2274,23 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 log_audio.debug(f"Usando dispositivo de entrada específico: {self.input_device_index}")
             else:
                 log_audio.debug(f"Usando multiplexado del sistema (device index no especificado)")
-            
+
             stream = self.audio.open(**stream_kwargs)
-            
+            stream_retries = 0  # Reset de reintentos al abrir exitosamente
+
             log_audio.info(f"🎤 Micrófono activado ({self.hw_rate} Hz)")
             if self.audio_enhancer:
                 log_audio.info("✅ Procesamiento activo: Filtro 300-3400Hz + Noise Gate + AGC + Anti-clipping")
                 log_audio.info("🇪🇸 Transcripción configurada en ESPAÑOL")
-            
+
             # Contador para logging de debug (no saturar consola)
             audio_chunk_counter = 0
-            
+            consecutive_inner_errors = 0  # Errores consecutivos de stream.read()
+
             while self.recording:
                 try:
                     data = stream.read(CHUNK, exception_on_overflow=False)
+                    consecutive_inner_errors = 0  # Reset al leer exitosamente
                     
                     # Calcular volumen REAL del micrófono para visualización
                     audio_array = np.frombuffer(data, dtype=np.int16).astype(np.float32)
@@ -2026,15 +2336,36 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 except Exception as e:
                     if self.recording:
                         log_audio.error(f"Error audio: {e}")
-                    break
-                    
-        except Exception as e:
-            self.root.after(0, self.append_message, "Error", f"Micrófono: {e}", 'system')
-        finally:
-            if 'stream' in locals():
-                stream.stop_stream()
-                stream.close()
-                log_audio.info("🎤 Micrófono detenido")
+                        consecutive_inner_errors += 1
+                        if consecutive_inner_errors >= MAX_INNER_ERRORS:
+                            log_audio.error(f"❌ {consecutive_inner_errors} errores consecutivos en stream — reiniciando...")
+                            break  # Salir del while interno → reintentar apertura del stream
+                        _rt.sleep(0.05)  # Pausa breve antes de reintentar lectura
+                    else:
+                        break  # recording=False → salir limpiamente
+
+          except Exception as e:
+            stream_retries += 1
+            error_msg = str(e)
+            log_audio.error(f"Error en stream de micrófono ({stream_retries}/{MAX_STREAM_RETRIES}): {error_msg}")
+            self.root.after(0, self.append_message, "Sistema",
+                           f"⚠️ Error de micrófono, reintentando... ({stream_retries}/{MAX_STREAM_RETRIES})", 'system')
+            if self.recording and stream_retries < MAX_STREAM_RETRIES:
+                _rt.sleep(RETRY_DELAY_S)
+          finally:
+            if 'stream' in locals() and stream is not None:
+                try:
+                    stream.stop_stream()
+                    stream.close()
+                    log_audio.info("🎤 Micrófono detenido")
+                except Exception:
+                    pass
+            stream = None  # Resetear para próximo intento
+
+        if stream_retries >= MAX_STREAM_RETRIES:
+            log_audio.error("❌ Se agotaron los reintentos de micrófono")
+            self.root.after(0, self.append_message, "Error",
+                           "❌ No se pudo recuperar el micrófono. Detén y reinicia el modo voz.", 'system')
                 
     def play_audio(self):
         """Reproduce audio del asistente con procesamiento profesional - ROBUSTO"""
@@ -2042,11 +2373,11 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         consecutive_errors = 0
         max_consecutive_errors = 10
         is_playing = False  # Flag para saber si estamos reproduciendo activamente
-        
+
         # Capturar hw_rate y ratios al inicio del thread para evitar cambios durante ejecución
         playback_hw_rate = self.hw_rate
         playback_resample_ratio = self.resample_ratio_out
-        
+
         try:
             # Intentar 24kHz primero (rate nativo de la API), fallback a hw_rate
             playback_rate = self.api_rate
@@ -2233,10 +2564,17 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
                 except:
                     pass
         finally:
-            if 'stream' in locals():
+            if 'stream' in locals() and stream is not None:
                 try:
                     stream.stop_stream()
                     stream.close()
+                except Exception:
+                    pass
+            # GARANTÍA: la boca siempre queda cerrada al salir del thread
+            if is_playing and self.mouth_controller:
+                try:
+                    self.mouth_controller.stop_speaking()
+                    log_audio.debug("🔇 Boca cerrada en finally de play_audio")
                 except Exception:
                     pass
                 
@@ -2318,54 +2656,64 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
         
     def send_message(self):
         message = self.message_entry.get('1.0', tk.END).strip()
-        
+
         if not message or not self.connected:
             return
-        
+
         # Agregar contexto visual si está disponible
         full_message = message
         display_message = message
-        
+
         # GPT-4V con cache inteligente
         if self.camera_running and GPT4V_AVAILABLE and self.gpt4v_service:
             import time
             current_time = time.time()
             cache_age = current_time - self.last_gpt4v_time
-            
-            # Usar cache si es reciente (<6s), sino generar fresco
-            if self.last_gpt4v_description and cache_age < self.gpt4v_cache_max_age:
+
+            # Si el usuario pregunta algo sobre lo que FRANK ve, forzar análisis fresco
+            # independientemente de si hay cache disponible
+            force_fresh = self.detect_vision_keyword(message)
+
+            if self.last_gpt4v_description and cache_age < self.gpt4v_cache_max_age and not force_fresh:
                 vision_description = self.last_gpt4v_description
                 full_message = f"Contexto visual actual: {vision_description}\n\nPregunta del usuario: {message}"
                 display_message = f"{message} 👁️"
                 log_vision.debug(f"💾 Cache usado ({cache_age:.1f}s): {vision_description[:50]}...")
             else:
-                log_vision.debug("Generando análisis fresco...")
-                
+                if force_fresh:
+                    log_vision.info(f"📸 Keyword visual en texto \u2014 forzando análisis fresco")
+                else:
+                    log_vision.debug("Generando análisis fresco...")
+
                 ret, frame = self.read_camera_frame()
                 if ret and frame is not None:
-                    result = self.gpt4v_service.quick_description(frame)
-                    
-                    vision_description = None
-                    cost = 0
-                    
-                    if isinstance(result, dict):
-                        if result.get('success'):
-                            vision_description = result.get('description', '')
-                            cost = result.get('cost', 0)
-                        else:
-                            vision_description = result.get('description', result.get('error', ''))
-                    elif isinstance(result, str):
-                        vision_description = result
-                    
-                    if vision_description:
+                    # Si es pregunta visual específica, usar la pregunta como prompt
+                    if force_fresh and message:
+                        result_raw = self.gpt4v_service.answer_question(frame, message)
+                        vision_description = result_raw if isinstance(result_raw, str) else ""
+                        cost = 0
+                    else:
+                        result_raw = self.gpt4v_service.quick_description(frame)
+                        vision_description = None
+                        cost = 0
+                        if isinstance(result_raw, dict):
+                            if result_raw.get('success'):
+                                vision_description = result_raw.get('description', '')
+                                cost = result_raw.get('cost', 0)
+                            else:
+                                vision_description = result_raw.get('description', result_raw.get('error', ''))
+                        elif isinstance(result_raw, str):
+                            vision_description = result_raw
+
+                    if vision_description and not vision_description.startswith("Error"):
                         self.last_gpt4v_description = vision_description
                         self.last_gpt4v_time = current_time
                         self.gpt4v_analyses_count += 1
                         self.gpt4v_total_cost += cost
-                        
+
                         full_message = f"Contexto visual actual: {vision_description}\n\nPregunta del usuario: {message}"
                         display_message = f"{message} 👁️"
-                        
+
                         # Actualizar stats en UI
                         self.update_stats()
                         
@@ -2399,11 +2747,13 @@ Recuerda: Eres FRANK, creado en el Cluster Tecnológico. No eres un asistente t�
             }
         }
         
-        # Especificar explícitamente que queremos audio en la respuesta
+        # Siempre pedir audio: la API reproduce voz Y envía transcripción para mostrar en el chat
+        # En modo texto: el usuario escribe, el asistente responde con voz + texto
+        # En modo voz: el usuario habla, el asistente responde con voz + texto
         response_event = {
             "type": "response.create",
             "response": {
-                "modalities": ["text", "audio"]
+                "output_modalities": ["audio"]
             }
         }
         

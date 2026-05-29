@@ -5,6 +5,7 @@ Usa la API de OpenAI para descripciones precisas bajo demanda
 import os
 import base64
 import requests
+import threading
 from typing import Dict, Optional
 import cv2
 import numpy as np
@@ -18,7 +19,8 @@ class GPT4VisionService:
     def __init__(self):
         self.api_key = os.getenv('OPENAI_API_KEY')
         self.api_url = "https://api.openai.com/v1/chat/completions"
-        self.model = "gpt-4o"  # Modelo con visión
+        self.model = "gpt-4.1"  # Modelo con visión (más reciente y capaz)
+        self._request_semaphore = threading.Semaphore(1)  # Solo 1 llamada activa a la vez
         
     def encode_frame(self, frame: np.ndarray, quality: int = 85) -> str:
         """
@@ -33,16 +35,16 @@ class GPT4VisionService:
         """
         # Redimensionar si es muy grande (balance calidad/costo)
         height, width = frame.shape[:2]
-        max_size = 1024  # Aumentado para mejor reconocimiento de detalles
-        
+        max_size = 512  # Reducido de 1024: menos CPU, menos GIL, menor latencia de red
+
         if max(height, width) > max_size:
             scale = max_size / max(height, width)
             new_width = int(width * scale)
             new_height = int(height * scale)
             frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
-        
+
         # Convertir a JPEG
-        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # 70 en lugar de 85: -50% tamaño, calidad suficiente
         _, buffer = cv2.imencode('.jpg', frame, encode_param)
         
         # Convertir a base64
@@ -73,6 +75,15 @@ class GPT4VisionService:
                 'description': ''
             }
         
+        # Evitar llamadas concurrentes: si ya hay una activa, rechazar la nueva
+        acquired = self._request_semaphore.acquire(blocking=False)
+        if not acquired:
+            return {
+                'success': False,
+                'error': 'Otra llamada a GPT-4V está en progreso',
+                'description': ''
+            }
+        
         try:
             # Codificar imagen
             base64_image = self.encode_frame(frame)
@@ -97,7 +108,7 @@ class GPT4VisionService:
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:image/jpeg;base64,{base64_image}",
-                                    "detail": "high"  # "high" para reconocer números, dedos, texto
+                                    "detail": "low"  # "low" para menor latencia y coste; usar "high" solo si se necesita leer texto/dedos
                                 }
                             }
                         ]
@@ -148,6 +159,8 @@ class GPT4VisionService:
                 'error': str(e),
                 'description': ''
             }
+        finally:
+            self._request_semaphore.release()
     
     def quick_description(self, frame: np.ndarray) -> str:
         """

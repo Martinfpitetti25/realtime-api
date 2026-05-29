@@ -7,7 +7,6 @@ import numpy as np
 from ultralytics import YOLO
 from typing import Optional, Tuple, List, Dict
 import threading
-import queue
 import time
 import sys
 from pathlib import Path
@@ -30,9 +29,7 @@ class CameraService:
         self.model_loaded = False
         self.last_detections = []  # Store last detections
         
-        # Thread-safe queues for async operation
-        self.frame_queue = queue.Queue(maxsize=2)
-        self.detection_queue = queue.Queue(maxsize=1)
+        # Threads para operación async
         self.capture_thread = None
         self.detection_thread = None
         
@@ -129,10 +126,10 @@ class CameraService:
         """Check if camera is available and running"""
         return self.is_running and self.camera is not None and self.camera.isOpened()
     
-    def load_yolo_model(self, model_name: str = "yolov8m.pt") -> bool:
+    def load_yolo_model(self, model_name: str = "yolov8n.pt") -> bool:
         """
         Load YOLO model (with caching to avoid reloading)
-        Now defaults to medium model for better accuracy
+        Uses nano model by default for lower CPU/RAM usage
         
         Args:
             model_name: Name of the YOLO model to load
