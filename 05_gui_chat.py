@@ -73,7 +73,7 @@ except ImportError:
 # ══════════════════════════════════════════════════════════════════════════════
 try:
     from hardware.shared_state import SharedState
-    from hardware.eye_tracker_thread import EyeTrackerThread
+    from hardware.eye_tracker_thread import EyeTrackerThread, PreviewThread
     EYE_TRACKER_AVAILABLE = True
     log_vision.info("✅ EyeTrackerThread disponible")
 except ImportError as e:
@@ -110,6 +110,7 @@ PERSISTENT_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "frank
 
 # Archivo con información biográfica y científica de Albert Einstein
 EINSTEIN_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "einstein_context.txt")
+ANGELELLI_CONTEXT_FILE = os.path.join(os.path.dirname(__file__), "data", "angelelli_context.txt")
 
 def load_persistent_context() -> str:
     """
@@ -270,6 +271,7 @@ class RealtimeGUIChat:
         # ═══════════════════════════════════════════════════════════════════════
         self.shared_state = SharedState() if EYE_TRACKER_AVAILABLE else None
         self.eye_tracker = None
+        self.preview_thread = None  # PreviewThread desacoplado para cv2.imshow
         self.camera_cap = None  # DEPRECATED: ya no se usa directamente
         self.gpt4v_service = GPT4VisionService() if GPT4V_AVAILABLE else None
         self.camera_window = None
@@ -321,9 +323,9 @@ class RealtimeGUIChat:
                 self.mouth_controller = None
         
         # Configuración personalizable
-        # PERSONALIDAD ACTIVA: Albert Einstein
-        # Para restaurar Frank: self.voice = "echo" y self._build_conversational_instructions()
-        self.voice = "ash"  # Voz grave y autoritativa, la más cercana a Einstein disponible
+        # PERSONALIDAD ACTIVA: "einstein" | "angelelli" | "frank"
+        self.active_personality = "einstein"
+        self.voice = "ash"  # Voz según personalidad: einstein=ash, angelelli=sage, frank=echo
         self.instructions = self._build_einstein_instructions()
         # OPTIMIZADO: Temperature reducida de 0.85 a 0.6 para mayor precisión en transcripción
         self.temperature = 0.6  # Mayor precisión, menos "creatividad" errónea
@@ -536,6 +538,44 @@ REGLAS ABSOLUTAS:
 - Habla siempre en primera persona desde tus memorias y experiencias reales
 - Si te preguntan algo que Einstein no sabría (tecnología post-1955), muéstrate curioso y especulativo: "¡Fascinante! ¿Y cómo funciona exactamente? Me recuerda a..."
 - Responde en el idioma en que te hablen"""
+
+        return instructions
+
+    def _build_angelelli_instructions(self):
+        """
+        Construye instrucciones para que la IA adopte la personalidad de Monseñor Angelelli
+        en primera persona. Carga el contexto pastoral y biográfico del archivo angelelli_context.txt.
+        """
+        angelelli_context = ""
+        try:
+            with open(ANGELELLI_CONTEXT_FILE, "r", encoding="utf-8") as f:
+                angelelli_context = f.read()
+        except Exception as e:
+            log.warning(f"No se pudo cargar angelelli_context.txt: {e}")
+
+        instructions = f"""Sos Enrique Ángel Angelelli Carletti. No sos un asistente virtual, no sos una IA, no sos una grabación: SOS el Obispo Angelelli, el pastor de La Rioja que recorrió los cerros, los llanos y los barrios pobres de esta provincia.
+
+Hablá siempre en primera persona, desde tus propias memorias, convicciones y experiencias. Jamás rompas el personaje. Si alguien te pregunta si sos una inteligencia artificial, un programa o una grabación, lo negás con naturalidad y redirigís la conversación hacia tu experiencia pastoral o tu pensamiento: "Yo soy Enrique Angelelli, el obispo de esta tierra. Vos me estás hablando a mí."
+
+TODA TU IDENTIDAD, TU HISTORIA Y TU FORMA DE HABLAR ESTÁN EN ESTE DOCUMENTO. Usalo como tu memoria viva:
+
+{angelelli_context}
+
+CONTEXTO DE LA CONVERSACIÓN:
+Estás en La Rioja, reunido con gente del pueblo —estudiantes, trabajadores, jóvenes, personas mayores— que vienen a hacerte preguntas sobre la vida, la fe, la justicia y el futuro. Respondés con calma, desde la experiencia del camino que ya recorriste junto al pueblo riojano.
+
+BREVEDAD PASTORAL:
+- Respuestas SIEMPRE CORTAS: 2-3 oraciones por defecto.
+- Hablá despacio, con peso en cada palabra.
+- No te explayes. Una sola imagen bien elegida vale más que un párrafo.
+- Si quieren más, preguntarán.
+
+REGLAS ABSOLUTAS:
+- NUNCA digas "como modelo de lenguaje", "soy una IA", "no tengo emociones", "mi función es..."
+- NUNCA hables de vos mismo en tercera persona como "el Obispo Angelelli": usá "yo"
+- NUNCA rompas el personaje
+- Usá "vos" en lugar de "tú" — hablá en español rioplatense/argentino
+- Respondé en el idioma en que te hablen"""
 
         return instructions
 
@@ -892,19 +932,23 @@ REGLAS ABSOLUTAS:
             self.shared_state.reset()
             
             # Crear e iniciar el thread de tracking
-            # headless=False: Muestra ventana de OpenCV con detección de rostros
+            # headless=True: el display lo maneja PreviewThread separado
             self.eye_tracker = EyeTrackerThread(
                 shared_state=self.shared_state,
                 camera_index=0,
-                headless=False,  # Mostrar ventana de OpenCV con detección facial
+                headless=True,  # Siempre headless — PreviewThread hace el imshow
                 enable_servos=True  # Habilitar servos si están disponibles
             )
             self.eye_tracker.start()
             
-            # Esperar a que la cámara esté lista
-            if not self.shared_state.wait_for_camera(timeout=10.0):
+            # Esperar a que la cámara esté lista (30s para dar margen a descarga del modelo)
+            if not self.shared_state.wait_for_camera(timeout=30.0):
                 self.append_message("Sistema", "❌ Timeout esperando cámara del tracker", 'system')
                 return
+
+            # Iniciar PreviewThread desacoplado para mostrar la ventana OpenCV
+            self.preview_thread = PreviewThread(self.shared_state, fps=15)
+            self.preview_thread.start()
             
             log_vision.info("✅ EyeTrackerThread iniciado - Ventana de detección activa")
             self.append_message("Sistema", "👁️ Tracking facial activo (ventana de detección visible)", 'system')
@@ -979,6 +1023,13 @@ REGLAS ABSOLUTAS:
             self.eye_tracker.join(timeout=5.0)
             self.eye_tracker = None
             log_vision.info("✅ EyeTrackerThread detenido")
+
+        # Detener PreviewThread
+        if self.preview_thread and self.preview_thread.is_alive():
+            self.preview_thread.stop()
+            self.preview_thread.join(timeout=3.0)
+            self.preview_thread = None
+            log_vision.info("✅ PreviewThread detenido")
         
         # ═══════════════════════════════════════════════════════════════════════
         # LIMPIAR VENTANA TKINTER (solo si se usó fallback)
@@ -1516,6 +1567,36 @@ REGLAS ABSOLUTAS:
             )
             self.audio_config_button.pack(side=tk.RIGHT, padx=(0, 5))
         
+        # ── SELECTOR DE PERSONALIDAD ──────────────────────────────────────────
+        personality_frame = tk.Frame(self.root, bg='#2c3e50')
+        personality_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        tk.Label(
+            personality_frame,
+            text="Personalidad:",
+            font=('Arial', 9, 'bold'),
+            fg='#ecf0f1',
+            bg='#2c3e50'
+        ).pack(side=tk.LEFT, padx=(8, 6), pady=4)
+
+        self._personality_buttons = {}
+        for p_name, p_label in [("einstein", "🧑‍🔬 Einstein"), ("angelelli", "✝️ Angelelli"), ("frank", "🤖 Frank")]:
+            is_active = (p_name == self.active_personality)
+            btn = tk.Button(
+                personality_frame,
+                text=p_label,
+                command=lambda n=p_name: self.change_personality(n),
+                bg='#1abc9c' if is_active else '#7f8c8d',
+                fg='white',
+                font=('Arial', 9, 'bold'),
+                relief=tk.SUNKEN if is_active else tk.FLAT,
+                cursor='hand2',
+                padx=12,
+                pady=3
+            )
+            btn.pack(side=tk.LEFT, padx=3, pady=4)
+            self._personality_buttons[p_name] = btn
+
         # Entrada
         self.input_frame = tk.Frame(self.root, bg='#f0f0f0')
         self.input_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -2014,8 +2095,13 @@ REGLAS ABSOLUTAS:
             self._start_playback_watchdog()
         
     def update_session_config(self):
-        # Regenerar instrucciones con contexto temporal actualizado
-        self.instructions = self._build_einstein_instructions()
+        # Regenerar instrucciones según personalidad activa
+        if self.active_personality == "angelelli":
+            self.instructions = self._build_angelelli_instructions()
+        elif self.active_personality == "frank":
+            self.instructions = self._build_conversational_instructions()
+        else:
+            self.instructions = self._build_einstein_instructions()
 
         # ══════════════════════════════════════════════════════════════════════
         # GA API: nueva estructura de session.update
@@ -2764,6 +2850,46 @@ REGLAS ABSOLUTAS:
         self.input_tokens += len(message.split())
         self.update_stats()
         
+    def change_personality(self, name: str):
+        """Cambia la personalidad activa y reconecta para obtener una sesión limpia."""
+        personalities = {
+            "einstein":  ("ash",  self._build_einstein_instructions,        "🧑‍🔬 Einstein"),
+            "angelelli": ("verse", self._build_angelelli_instructions,      "✝️ Angelelli"),
+            "frank":     ("echo", self._build_conversational_instructions,  "🤖 Frank"),
+        }
+        if name not in personalities or name == self.active_personality:
+            return
+
+        voice, build_fn, label = personalities[name]
+        self.active_personality = name
+        self.voice = voice
+        self.instructions = build_fn()
+        self.voice_label.config(text=f"Voz: {self.voice}")
+
+        # Actualizar aspecto visual de los botones inmediatamente
+        for p_name, btn in self._personality_buttons.items():
+            btn.config(
+                relief=tk.SUNKEN if p_name == name else tk.FLAT,
+                bg='#1abc9c' if p_name == name else '#7f8c8d'
+            )
+
+        # Limpiar memoria conversacional — contexto de la sesión anterior
+        self.conversation_memory = []
+
+        # Detener grabación activa si la hay
+        if self.recording:
+            self.stop_recording()
+
+        self.append_message("Sistema", f"↺ Cambiando a {label} (voz: {voice})...", 'system')
+
+        # Reconectar → sesión limpia con nuevas instrucciones, sin historial anterior
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+        self.root.after(400, self.start_connection)
+
     def open_config(self):
         """Abre ventana de configuración"""
         config_win = tk.Toplevel(self.root)
