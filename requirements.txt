@@ -9,7 +9,10 @@ requests>=2.31.0
 pvporcupine>=3.0.0
 
 # Computer Vision (para detección de objetos)
-opencv-contrib-python>=4.12.0
+# opencv-contrib-python — NO instalar desde pip. Usar el paquete del sistema:
+#   sudo apt install python3-opencv
+#   El venv debe crearse con: python3 -m venv --system-site-packages .venv
+#   Después de cualquier `pip install`, ejecutar: pip uninstall -y opencv-python opencv-contrib-python
 ultralytics>=8.0.196
 # mediapipe>=0.10.14  # Opcional - solo para face tracking (requiere Python <3.12)
 

@@ -80,6 +80,12 @@ class SharedState:
             "neck_yaw": 0.0,
             "neck_pitch": 0.0
         }
+
+        # Display frame (anotado, para PreviewThread)
+        self._display_frame: Optional[np.ndarray] = None
+        self._display_frame_time: float = 0.0
+        self._display_lock = threading.Lock()
+
     
     # ═══════════════════════════════════════════════════════════════════════
     # MÉTODOS DE ESCRITURA (solo para EyeTrackerThread)
@@ -155,7 +161,21 @@ class SharedState:
             self._servo_positions["right_v"] = right_v
             self._servo_positions["neck_yaw"] = neck_yaw
             self._servo_positions["neck_pitch"] = neck_pitch
-    
+
+    def update_display_frame(self, frame: np.ndarray) -> None:
+        """Actualiza el frame anotado para el preview. Solo debe llamarlo EyeTrackerThread."""
+        with self._display_lock:
+            self._display_frame = frame.copy()
+            self._display_frame_time = time.time()
+
+    def get_display_frame(self) -> Tuple[bool, Optional[np.ndarray], float]:
+        """Obtiene el frame anotado listo para mostrar en pantalla."""
+        with self._display_lock:
+            if self._display_frame is None:
+                return False, None, float('inf')
+            age = time.time() - self._display_frame_time
+            return True, self._display_frame.copy(), age
+
     # ═══════════════════════════════════════════════════════════════════════
     # MÉTODOS DE LECTURA (para cualquier thread)
     # ═══════════════════════════════════════════════════════════════════════
@@ -282,6 +302,10 @@ class SharedState:
             self._tracker_fps = 0.0
             self._tracker_mode = "idle"
             self._tracker_error = None
-        
+
+        with self._display_lock:
+            self._display_frame = None
+            self._display_frame_time = 0.0
+
         self.camera_ready.clear()
         self.stop_requested.clear()

@@ -393,38 +393,51 @@ class EyeTrackerThread(threading.Thread):
         """Ya no bloquea el loop: el parpadeo corre en BlinkThread.
         Se mantiene por compatibilidad pero no hace nada."""
         pass
-    
+
+    def _open_camera(self, first_index: int) -> Optional[cv2.VideoCapture]:
+        """Abre la cámara con retry en múltiples índices. Retorna cap abierto o None."""
+        _try_indices = list(dict.fromkeys([first_index, 0, 1, 2]))
+        for attempt in range(3):
+            for idx in _try_indices:
+                _cap = cv2.VideoCapture(idx)
+                _cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                _cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                _cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimizar buffer → frames más frescos
+                if _cap.isOpened():
+                    log.info(f"✅ Cámara abierta en índice {idx}")
+                    return _cap
+                _cap.release()
+            if attempt < 2:
+                log.warning(f"⚠️ Intento {attempt + 1}/3 fallido — reintentando en 2s...")
+                time.sleep(2.0)
+        return None
+
     def run(self) -> None:
         """Loop principal del thread de tracking."""
         log.info("🤖 EyeTrackerThread iniciando...")
-        
+
         # Asegurar que el modelo existe
         if not self._ensure_model():
             self.shared_state.update_tracker_status(False, error="No se pudo cargar modelo YuNet")
             return
-        
+
         # Abrir cámara
-        self.cap = cv2.VideoCapture(self.camera_index)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        
-        if not self.cap.isOpened():
-            log.error("❌ No se pudo abrir la cámara")
+        self.cap = self._open_camera(self.camera_index)
+        if self.cap is None:
+            log.error("❌ No se pudo abrir la cámara tras 3 intentos")
             self.shared_state.update_tracker_status(False, error="No se pudo abrir la cámara")
             return
-        
-        log.info(f"✅ Cámara abierta en /dev/video{self.camera_index}")
-        
+
         # Crear detector facial
         self.face_detector = cv2.FaceDetectorYN.create(
             str(MODEL_PATH), "", (640, 480),
             score_threshold=0.6, nms_threshold=0.3
         )
-        
+
         # Inicializar servos
         self._init_servos()
-        
-        # Arrancar thread dedicado al parpadeo (no bloquea el tracking)
+
+        # Arrancar thread dedicado al parpadeo
         if self.enable_servos:
             self._blink_stop.clear()
             self._blink_thread = threading.Thread(
@@ -434,34 +447,102 @@ class EyeTrackerThread(threading.Thread):
             )
             self._blink_thread.start()
             log.info("✅ BlinkThread iniciado")
-        
+
+        # Iniciar CameraReader: lee frames en su propio thread para no bloquear el loop
+        import queue as _qmod
+        self._frame_queue: _qmod.Queue = _qmod.Queue(maxsize=2)
+        self._cam_reader_stop = threading.Event()
+
+        def _camera_reader_loop():
+            while not self._cam_reader_stop.is_set():
+                if self.cap is None or not self.cap.isOpened():
+                    time.sleep(0.05)
+                    continue
+                ok, frm = self.cap.read()
+                if ok:
+                    # Drop frame si la cola está llena (preferir frame fresco)
+                    if self._frame_queue.full():
+                        try:
+                            self._frame_queue.get_nowait()
+                        except Exception:
+                            pass
+                    try:
+                        self._frame_queue.put_nowait(frm)
+                    except Exception:
+                        pass
+                else:
+                    time.sleep(0.01)
+
+        self._cam_reader_thread = threading.Thread(
+            target=_camera_reader_loop,
+            daemon=True,
+            name="CameraReader"
+        )
+        self._cam_reader_thread.start()
+
         # Señalar que la cámara está lista
         self.shared_state.camera_ready.set()
         self.shared_state.update_tracker_status(True, fps=0.0, mode="idle")
-        
+
         # Inicializar tiempos
         self.last_time = time.time()
         self.last_seen = time.time() * 1000.0
         self.fps_t = time.time()
-        
+        self._last_frame_time = time.time()  # Watchdog de stall
+
         log.info("🎯 Loop de tracking iniciado")
-        
+
         try:
             while not self.shared_state.stop_requested.is_set():
+                # Watchdog: si no llega ningún frame en 5s → reconectar cámara
+                if time.time() - self._last_frame_time > 5.0:
+                    log.warning("⚠️ Stall de cámara detectado (5s sin frames) — reconectando...")
+                    old_cap = self.cap
+                    self.cap = None
+                    try:
+                        old_cap.release()
+                    except Exception:
+                        pass
+                    # Vaciar cola
+                    while not self._frame_queue.empty():
+                        try:
+                            self._frame_queue.get_nowait()
+                        except Exception:
+                            break
+                    time.sleep(1.0)
+                    new_cap = self._open_camera(self.camera_index)
+                    if new_cap is not None:
+                        self.cap = new_cap
+                        self._last_frame_time = time.time()
+                        log.info("✅ Cámara reconectada")
+                    else:
+                        log.error("❌ No se pudo reconectar la cámara — esperando 5s...")
+                        time.sleep(5.0)
+                        self._last_frame_time = time.time()  # Reset para no spamear
+                    continue
+
                 self._tracking_loop_iteration()
-        
+
         except Exception as e:
             log.error(f"❌ Error en loop de tracking: {e}")
             import traceback
             traceback.print_exc()
-        
+
         finally:
+            self._cam_reader_stop.set()
             self._cleanup()
     
     def _tracking_loop_iteration(self) -> None:
         """Una iteración del loop de tracking."""
-        ok, frame = self.cap.read()
-        if not ok:
+        _TARGET_DT = 1.0 / 25.0  # Cap a 25 FPS
+        _iter_start = time.time()
+
+        # Leer frame de la cola del CameraReader (timeout 0.1s)
+        try:
+            frame = self._frame_queue.get(timeout=0.1)
+            self._last_frame_time = time.time()  # Reset watchdog
+        except Exception:
+            # No hay frame nuevo — el watchdog en run() maneja el stall si persiste
             return
         
         # Actualizar frame en SharedState ANTES de rotar (sin copia extra)
@@ -734,18 +815,23 @@ class EyeTrackerThread(threading.Thread):
                 self.cuello_yaw_ang, self.cuello_pitch_ang
             )
         
-        # Mostrar ventana si no es headless (para debug)
-        if not self.headless:
-            cv2.line(frame, (cx, 0), (cx, h), (255, 0, 0), 1)
-            cv2.line(frame, (0, cy), (w, cy), (255, 0, 0), 1)
-            
-            if faces is not None and best is not None:
-                cv2.rectangle(frame, (bx, by), (bx+bw, by+bh), (0, 255, 0), 2)
-                cv2.circle(frame, (fx, fy), 5, (0, 0, 255), -1)
-            
-            cv2.imshow("EyeTracker", frame)
-            if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
-                self.shared_state.request_stop()
+        # Componer frame anotado y publicarlo en SharedState.
+        # PreviewThread (hilo separado) lo leerá y llamará cv2.imshow — nunca desde aquí.
+        display = frame.copy()
+        cv2.line(display, (cx, 0), (cx, h), (255, 0, 0), 1)
+        cv2.line(display, (0, cy), (w, cy), (255, 0, 0), 1)
+        if faces is not None and best is not None:
+            cv2.rectangle(display, (bx, by), (bx+bw, by+bh), (0, 255, 0), 2)
+            cv2.circle(display, (fx, fy), 5, (0, 0, 255), -1)
+        status_text = f"FPS:{self.current_fps:.1f}"
+        cv2.putText(display, status_text, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        self.shared_state.update_display_frame(display)
+
+        # Cap a 25 FPS: dormir el tiempo restante de la iteración
+        _elapsed = time.time() - _iter_start
+        _sleep = _TARGET_DT - _elapsed
+        if _sleep > 0.001:
+            time.sleep(_sleep)
         
 
     
@@ -769,10 +855,8 @@ class EyeTrackerThread(threading.Thread):
         # Liberar cámara
         if self.cap:
             self.cap.release()
-        
-        # Cerrar ventanas
-        if not self.headless:
-            cv2.destroyAllWindows()
+
+        # Las ventanas OpenCV las cierra PreviewThread (no llamar destroyAllWindows aquí)
         
         # Actualizar estado
         self.shared_state.camera_ready.clear()
@@ -783,6 +867,88 @@ class EyeTrackerThread(threading.Thread):
     def stop(self) -> None:
         """Solicita detener el thread de forma limpia."""
         self.shared_state.request_stop()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PREVIEW THREAD — muestra la ventana OpenCV de forma desacoplada del tracker
+# ══════════════════════════════════════════════════════════════════════════════
+
+class PreviewThread(threading.Thread):
+    """
+    Thread dedicado a mostrar el preview de la cámara con anotaciones.
+
+    Completamente desacoplado de EyeTrackerThread: lee el frame anotado del
+    SharedState a ~15 FPS y llama cv2.imshow/cv2.waitKey desde su propio
+    contexto, evitando que la detección YuNet congele el display.
+    """
+
+    def __init__(self, shared_state: SharedState, fps: int = 15):
+        super().__init__(daemon=True, name="PreviewThread")
+        self.shared_state = shared_state
+        self.target_dt = 1.0 / fps
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        """Señala al thread que debe detenerse."""
+        self._stop_event.set()
+
+    def run(self) -> None:
+        log.info("🖥️ PreviewThread iniciado")
+        window_name = "EyeTracker"
+
+        # CRÍTICO en Linux/GTK: habilita highgui desde threads de fondo
+        try:
+            cv2.startWindowThread()
+        except Exception:
+            pass
+
+        # Crear ventana desde este thread
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, 480, 640)
+            log.info("🖥️ Ventana EyeTracker creada")
+        except Exception as e:
+            log.warning(f"PreviewThread: namedWindow error: {e}")
+
+        no_frame_count = 0
+
+        while not self._stop_event.is_set() and not self.shared_state.stop_requested.is_set():
+            t0 = time.time()
+
+            success, frame, age = self.shared_state.get_display_frame()
+
+            if success and frame is not None and age < 1.5:
+                no_frame_count = 0
+                try:
+                    cv2.imshow(window_name, frame)
+                except Exception as e:
+                    log.debug(f"PreviewThread imshow error: {e}")
+                    # No hacer break — reintentar en el siguiente ciclo
+            else:
+                no_frame_count += 1
+                # Sin frame por más de 5 segundos: loguear una vez y esperar
+                if no_frame_count == 75:  # ~5s a 15fps
+                    log.warning("⚠️ PreviewThread: sin frames del tracker por 5s")
+
+            # waitKey SIEMPRE: procesa eventos de ventana aunque no haya frame nuevo
+            try:
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord('q'), 27):
+                    self.shared_state.request_stop()
+                    break
+            except Exception:
+                pass
+
+            elapsed = time.time() - t0
+            sleep_t = self.target_dt - elapsed
+            if sleep_t > 0.001:
+                time.sleep(sleep_t)
+
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        log.info("🖥️ PreviewThread detenido")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
