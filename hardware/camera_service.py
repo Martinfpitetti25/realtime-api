@@ -35,7 +35,9 @@ class CameraService:
         
         # Configurable parameters (optimized for Realtime API)
         self.confidence = 0.5
-        self.target_width = 640
+        # Resolución nativa del capturador AV USB (NTSC 720x480).
+        # 640x480 causaba mismatch de stride en YUYV → artefactos de color.
+        self.target_width = 720
         self.target_height = 480
         self.yolo_enabled = True
         
@@ -57,7 +59,7 @@ class CameraService:
         logger.info("🔍 Buscando cámaras disponibles...")
         
         for index in range(max_cameras):
-            cap = cv2.VideoCapture(index)
+            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
             if cap.isOpened():
                 ret, _ = cap.read()
                 cap.release()
@@ -90,7 +92,8 @@ class CameraService:
                 return False
         
         self.camera_index = camera_index
-        self.camera = cv2.VideoCapture(camera_index)
+        # Forzar V4L2: evita que GStreamer intervenga y corrompa frames ocasionalmente
+        self.camera = cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
         
         if not self.camera.isOpened():
             logger.error(f"❌ No se pudo abrir la cámara en índice {camera_index}")
@@ -100,9 +103,13 @@ class CameraService:
         self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.target_width)
         self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.target_height)
         self.camera.set(cv2.CAP_PROP_FPS, 30)
+        # Buffer 4: necesario para YUYV 720x480 sin frames partidos
+        self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 4)
         
+        actual_w = int(self.camera.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self.camera.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.is_running = True
-        logger.info(f"✅ Cámara iniciada ({self.target_width}x{self.target_height}@30fps)")
+        logger.info(f"✅ Cámara iniciada ({actual_w}x{actual_h}@30fps, V4L2, buffer=4)")
         return True
     
     def stop_camera(self):

@@ -399,12 +399,22 @@ class EyeTrackerThread(threading.Thread):
         _try_indices = list(dict.fromkeys([first_index, 0, 1, 2]))
         for attempt in range(3):
             for idx in _try_indices:
-                _cap = cv2.VideoCapture(idx)
-                _cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                # Forzar V4L2 explícitamente: evita que el OpenCV del sistema
+                # elija GStreamer por defecto, que falla con V4L2 posicional
+                # y causa corrupción completa del frame ocasionalmente.
+                _cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+                # Resolución nativa del capturador: 720x480 (NTSC).
+                # Pedir 640x480 causa mismatch de stride en YUYV 4:2:2
+                # → artefactos de color y líneas horizontales partidas.
+                _cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
                 _cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                _cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimizar buffer → frames más frescos
+                # Buffer 4: suficiente para que el driver procese YUYV completo
+                # antes del siguiente read. Buffer=1 causaba frames incompletos.
+                _cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
                 if _cap.isOpened():
-                    log.info(f"✅ Cámara abierta en índice {idx}")
+                    actual_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    actual_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    log.info(f"✅ Cámara abierta en índice {idx} — {actual_w}x{actual_h} (V4L2)")
                     return _cap
                 _cap.release()
             if attempt < 2:
@@ -453,8 +463,11 @@ class EyeTrackerThread(threading.Thread):
         self._frame_queue: _qmod.Queue = _qmod.Queue(maxsize=2)
         self._cam_reader_stop = threading.Event()
 
+        _READER_TARGET_DT = 1.0 / 32.0  # Cap a 32fps: evita hammering del bus USB
+
         def _camera_reader_loop():
             while not self._cam_reader_stop.is_set():
+                _t0 = time.time()
                 if self.cap is None or not self.cap.isOpened():
                     time.sleep(0.05)
                     continue
@@ -472,6 +485,14 @@ class EyeTrackerThread(threading.Thread):
                         pass
                 else:
                     time.sleep(0.01)
+                    continue
+                # Throttle: dormir el tiempo restante para no saturar el bus USB.
+                # Sin esto el reader corre a ~200fps en el lock del driver,
+                # causando spikes de bandwidth que rompen frames YUYV.
+                _elapsed = time.time() - _t0
+                _sleep = _READER_TARGET_DT - _elapsed
+                if _sleep > 0.001:
+                    time.sleep(_sleep)
 
         self._cam_reader_thread = threading.Thread(
             target=_camera_reader_loop,
