@@ -530,7 +530,12 @@ class EyeTrackerThread(threading.Thread):
                             self._frame_queue.get_nowait()
                         except Exception:
                             break
-                    time.sleep(1.0)
+                    # Esperar más tiempo: si el dispositivo USB sufrió un
+                    # disconnect/reconnect físico, el kernel necesita ~5-8s
+                    # para re-enumerar el dispositivo antes de que
+                    # VideoCapture pueda abrirlo de nuevo.
+                    log.info("⏳ Esperando re-enumeración USB (8s)...")
+                    time.sleep(8.0)
                     new_cap = self._open_camera(self.camera_index)
                     if new_cap is not None:
                         self.cap = new_cap
