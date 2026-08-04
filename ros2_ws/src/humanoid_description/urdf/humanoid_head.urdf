@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<!-- Unified Robot Description Format (URDF) for Humanoid Head & Vision Actuators -->
+<robot name="humanoid_head">
+
+  <!-- Materials Definition -->
+  <material name="dark_gray">
+    <color rgba="0.2 0.2 0.2 1.0"/>
+  </material>
+  <material name="cyan">
+    <color rgba="0.0 0.8 0.8 1.0"/>
+  </material>
+  <material name="white">
+    <color rgba="0.9 0.9 0.9 1.0"/>
+  </material>
+
+  <!-- Base Link (Torso Attachment Point) -->
+  <link name="base_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.1" radius="0.08"/>
+      </geometry>
+      <material name="dark_gray"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="0.1" radius="0.08"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="2.5"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0.0" ixz="0.0" iyy="0.01" iyz="0.0" izz="0.01"/>
+    </inertial>
+  </link>
+
+  <!-- Neck Yaw Joint (Horizontal Rotation) -->
+  <joint name="neck_yaw_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="neck_link"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="5.0" velocity="3.14"/>
+  </joint>
+
+  <link name="neck_link">
+    <visual>
+      <geometry>
+        <cylinder length="0.12" radius="0.03"/>
+      </geometry>
+      <material name="cyan"/>
+    </visual>
+    <collision>
+      <geometry>
+        <cylinder length="0.12" radius="0.03"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.4"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.001" ixy="0.0" ixz="0.0" iyy="0.001" iyz="0.0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Neck Pitch Joint (Vertical Nodding) -->
+  <joint name="neck_pitch_joint" type="revolute">
+    <parent link="neck_link"/>
+    <child link="head_base_link"/>
+    <origin xyz="0 0 0.06" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.78" upper="0.78" effort="5.0" velocity="3.14"/>
+  </joint>
+
+  <link name="head_base_link">
+    <visual>
+      <geometry>
+        <box size="0.15 0.18 0.16"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.15 0.18 0.16"/>
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="1.2"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.005" ixy="0.0" ixz="0.0" iyy="0.005" iyz="0.0" izz="0.005"/>
+    </inertial>
+  </link>
+
+  <!-- Left Eye Joint -->
+  <joint name="eye_left_joint" type="revolute">
+    <parent link="head_base_link"/>
+    <child link="eye_left_link"/>
+    <origin xyz="0.07 0.04 0.02" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.6" upper="0.6" effort="0.5" velocity="6.0"/>
+  </joint>
+
+  <link name="eye_left_link">
+    <visual>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+      <material name="cyan"/>
+    </visual>
+  </link>
+
+  <!-- Right Eye Joint -->
+  <joint name="eye_right_joint" type="revolute">
+    <parent link="head_base_link"/>
+    <child link="eye_right_link"/>
+    <origin xyz="0.07 -0.04 0.02" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-0.6" upper="0.6" effort="0.5" velocity="6.0"/>
+  </joint>
+
+  <link name="eye_right_link">
+    <visual>
+      <geometry>
+        <sphere radius="0.015"/>
+      </geometry>
+      <material name="cyan"/>
+    </visual>
+  </link>
+
+  <!-- Camera Optical Frame (Sensor Reference) -->
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="head_base_link"/>
+    <child link="camera_optical_frame"/>
+    <origin xyz="0.08 0 0.02" rpy="-1.5708 0 -1.5708"/>
+  </joint>
+
+  <link name="camera_optical_frame"/>
+
+</robot>

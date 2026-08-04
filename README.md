@@ -1,111 +1,77 @@
-# Realtime-IA - Asistente de IA en Tiempo Real 
+# 🤖 Realtime Multimodal Humanoid Assistant
 
-Este proyecto implementa un asistente de IA conversacional usando la API de OpenAI Realtime con capacidades de audio, visión por computadora y detección por wake word.
-
-
-##  Dependencias Instaladas
-
-- websocket-client (conexión en tiempo real)
-- python-dotenv (gestión de variables de entorno)
-- pyaudio (procesamiento de audio)
-- numpy y scipy (procesamiento numérico)
-- opencv-contrib-python (visión por computadora)
-- ultralytics (YOLO para detección de objetos)
-- pvporcupine (detección de wake word)
-
-##  Scripts Disponibles
-
-### Principal
-- **05_gui_chat.py** - Interfaz gráfica mejorada con wake word detection
-
-### En Backups
-- 00_test_connection.py - Test de conexión
-- 01_basic_connection.py - Conexión básica
-- 02_text_chat.py - Chat de texto
-- 03_audio_chat.py - Chat de audio
-- 04_raspberry_pi.py - Versión para Raspberry Pi
-- 06_robot_assistant.py - Asistente robótico
-- 07_vision_realtime.py - Visión en tiempo real
-
-##  Cómo Ejecutar
-
-### Ejecutar la interfaz gráfica principal:
-```bash
-/home/cluster/Projects/Realtime-IA/.venv/bin/python 05_gui_chat.py
-```
-
-O usando el script de inicio rápido:
-```bash
-./quick.sh
-```
-
-##  Configuración
-
-El archivo `.env` ya está configurado con:
-- `OPENAI_API_KEY` - Tu API key de OpenAI
-- `PORCUPINE_ACCESS_KEY` - Key para wake word detection (opcional)
-
-Para obtener un access key gratuito de Porcupine: https://console.picovoice.ai/
-
-## 📚 Documentación Adicional
-
-- [docs/AUDIO_CONFIGURED.md](docs/AUDIO_CONFIGURED.md) - Configuración de audio
-- [docs/QUICKSTART.md](docs/QUICKSTART.md) - Guía de inicio rápido
-- [docs/WAKE_WORD_SETUP.md](docs/WAKE_WORD_SETUP.md) - Configuración de wake word
-- [docs/MEJORAS_RECONOCIMIENTO_VOZ.md](docs/MEJORAS_RECONOCIMIENTO_VOZ.md) - Mejoras de reconocimiento de voz
-- [docs/README_DOCKER.md](docs/README_DOCKER.md) - Instrucciones para Docker
-- [docs/VISION_README.md](docs/VISION_README.md) - Documentación de visión
-
-##  Docker (Opcional)
-
-El proyecto incluye `Dockerfile` y `docker-compose.yml` para ejecución en contenedores.
-
-```bash
-docker-compose up -d
-```
-
-##  Hardware Soportado
-
-- Desktop/Laptop con micrófono y cámara
-- Raspberry Pi (script específico incluido)
-- Cualquier dispositivo Linux con Python 3.10+
-
-##  Estructura del Proyecto
-
-```
-.
-├── 05_gui_chat.py           # Interfaz principal
-├── requirements.txt         # Dependencias
-├── .env                     # Variables de entorno
-├── backups/                 # Scripts antiguos
-├── docs/                    # Documentación
-├── hardware/                # Servicios de hardware
-├── models/                  # Modelos YOLO
-├── scripts/                 # Scripts de utilidad
-├── tests/                   # Tests
-└── utils/                   # Utilidades
-```
-
-##  Características
-
--  Chat de voz en tiempo real
--  Reconocimiento de wake word ("jarvis", "computer", etc.)
--  Visión por computadora con YOLO
--  Interfaz gráfica moderna
--  Soporte para Raspberry Pi
--  Mejoras de audio con cancelación de ruido
-
-##  Solución de Problemas
-
-Si encuentras problemas con audio:
-1. Verifica que PyAudio esté instalado correctamente
-2. Ejecuta `./start_audio.sh` para configurar el audio
-3. Revisa la documentación en `docs/AUDIO_CONFIGURED.md`
-
-##  Licencia
-
-MIT License - Ver archivo LICENSE para detalles
+An end-to-end real-time conversational humanoid robot platform integrating **OpenAI Realtime API (WebSockets)**, **High-Speed Vision PID Servo Actuation**, **YOLO & GPT-4 Multimodal Vision**, and a production **ROS 2 C++ / FreeRTOS** architecture.
 
 ---
 
-**Nota:** Este proyecto requiere una API key válida de OpenAI para funcionar.
+## 🏛️ Project Architecture
+
+```
+realtime-api/
+├── main.py                       # Main application entry point launcher
+├── 05_gui_chat.py                # Graphical User Interface & WebSockets pipeline
+├── hardware/                     # Thread-safe hardware controllers & SharedState
+│   ├── shared_state.py           # Thread-safe Singleton state container
+│   ├── eye_tracker_thread.py     # 6-DOF Eye & Neck PID control loop (YuNet 30 FPS)
+│   ├── mouth_controller.py       # Speech-synced PWM mouth servo controller
+│   ├── camera_service.py         # YOLOv8 local object detection service
+│   └── gpt4_vision_service.py    # On-demand GPT-4 Vision service with caching
+├── utils/                        # Audio device management & noise gate enhancers
+├── models/                       # Computer vision models (YOLOv8, YuNet ONNX)
+├── ros2_ws/                      # Production ROS 2 C++ & FreeRTOS colcon workspace
+│   └── src/
+│       ├── humanoid_interfaces/  # Custom ROS 2 msg definitions (TargetPosition, JointAngles)
+│       ├── humanoid_control/     # C++ 100Hz PID tracking node (rclcpp)
+│       ├── humanoid_description/ # URDF 3D robot kinematics model
+│       └── humanoid_firmware/    # ESP32 dual-core FreeRTOS / micro-ROS driver
+├── scripts/                      # Startup, configuration, and helper scripts
+├── tests/                        # Automated unit & integration tests
+├── docs/                         # System architecture & documentation
+└── legacy/                       # Historical prototypes & hardware experiment archives
+```
+
+---
+
+## 🚀 Quickstart
+
+### 1. Requirements
+- Python 3.10+
+- OpenAL / PortAudio (`pyaudio`)
+- OpenCV & NumPy
+
+### 2. Installation
+```bash
+# Clone the repository
+git clone https://github.com/Martinfpitetti25/realtime-api.git
+cd realtime-api
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure environment variables
+cp .env.example .env
+# Edit .env and set OPENAI_API_KEY=your_api_key
+```
+
+### 3. Run Application
+```bash
+python main.py
+```
+
+---
+
+## ⚙️ ROS 2 C++ Workspace Build (`ros2_ws`)
+
+```bash
+cd ros2_ws
+colcon build --symlink-install
+source install/setup.bash
+
+# Run the 100Hz C++ Eye Tracking Node
+ros2 run humanoid_control eye_tracking_node
+```
+
+---
+
+## 📄 License
+MIT License
