@@ -399,22 +399,14 @@ class EyeTrackerThread(threading.Thread):
         _try_indices = list(dict.fromkeys([first_index, 0, 1, 2]))
         for attempt in range(3):
             for idx in _try_indices:
-                # Forzar V4L2 explícitamente: evita que el OpenCV del sistema
-                # elija GStreamer por defecto, que falla con V4L2 posicional
-                # y causa corrupción completa del frame ocasionalmente.
-                _cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-                # Resolución nativa del capturador: 720x480 (NTSC).
-                # Pedir 640x480 causa mismatch de stride en YUYV 4:2:2
-                # → artefactos de color y líneas horizontales partidas.
-                _cap.set(cv2.CAP_PROP_FRAME_WIDTH, 720)
+                _cap = cv2.VideoCapture(idx)
+                _cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 _cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-                # Buffer 4: suficiente para que el driver procese YUYV completo
-                # antes del siguiente read. Buffer=1 causaba frames incompletos.
-                _cap.set(cv2.CAP_PROP_BUFFERSIZE, 4)
+                _cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimizar buffer → frames más frescos
+                # Preferir MJPEG para evitar frames verdes con formato YUYV en Linux
+                _cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
                 if _cap.isOpened():
-                    actual_w = int(_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                    actual_h = int(_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                    log.info(f"✅ Cámara abierta en índice {idx} — {actual_w}x{actual_h} (V4L2)")
+                    log.info(f"✅ Cámara abierta en índice {idx}")
                     return _cap
                 _cap.release()
             if attempt < 2:
@@ -429,25 +421,28 @@ class EyeTrackerThread(threading.Thread):
         # Asegurar que el modelo existe
         if not self._ensure_model():
             self.shared_state.update_tracker_status(False, error="No se pudo cargar modelo YuNet")
+            self.shared_state.camera_ready.set()  # Desbloquear waiters aunque haya fallo
             return
 
         # Abrir cámara
         self.cap = self._open_camera(self.camera_index)
-        if self.cap is None:
-            log.error("❌ No se pudo abrir la cámara tras 3 intentos")
-            self.shared_state.update_tracker_status(False, error="No se pudo abrir la cámara")
-            return
+        camera_available = self.cap is not None
 
-        # Crear detector facial
-        self.face_detector = cv2.FaceDetectorYN.create(
-            str(MODEL_PATH), "", (640, 480),
-            score_threshold=0.6, nms_threshold=0.3
-        )
+        if not camera_available:
+            log.warning("⚠️ Sin cámara — modo sin cámara: servos + parpadeo activos")
+            self.shared_state.update_tracker_status(False, error="Sin cámara")
+            self.shared_state.camera_ready.set()  # Desbloquear waiters inmediatamente
+        else:
+            # Crear detector facial solo si hay cámara
+            self.face_detector = cv2.FaceDetectorYN.create(
+                str(MODEL_PATH), "", (640, 480),
+                score_threshold=0.6, nms_threshold=0.3
+            )
 
-        # Inicializar servos
+        # Inicializar servos (independiente de la cámara)
         self._init_servos()
 
-        # Arrancar thread dedicado al parpadeo
+        # Arrancar thread dedicado al parpadeo (independiente de la cámara)
         if self.enable_servos:
             self._blink_stop.clear()
             self._blink_thread = threading.Thread(
@@ -458,16 +453,23 @@ class EyeTrackerThread(threading.Thread):
             self._blink_thread.start()
             log.info("✅ BlinkThread iniciado")
 
+        if not camera_available:
+            # Modo sin cámara: mantener servos + parpadeo activos hasta que se solicite stop
+            log.info("🔄 Loop sin cámara iniciado (solo servos + parpadeo)")
+            try:
+                while not self.shared_state.stop_requested.is_set():
+                    time.sleep(0.1)
+            finally:
+                self._cleanup()
+            return
+
         # Iniciar CameraReader: lee frames en su propio thread para no bloquear el loop
         import queue as _qmod
         self._frame_queue: _qmod.Queue = _qmod.Queue(maxsize=2)
         self._cam_reader_stop = threading.Event()
 
-        _READER_TARGET_DT = 1.0 / 32.0  # Cap a 32fps: evita hammering del bus USB
-
         def _camera_reader_loop():
             while not self._cam_reader_stop.is_set():
-                _t0 = time.time()
                 if self.cap is None or not self.cap.isOpened():
                     time.sleep(0.05)
                     continue
@@ -485,14 +487,6 @@ class EyeTrackerThread(threading.Thread):
                         pass
                 else:
                     time.sleep(0.01)
-                    continue
-                # Throttle: dormir el tiempo restante para no saturar el bus USB.
-                # Sin esto el reader corre a ~200fps en el lock del driver,
-                # causando spikes de bandwidth que rompen frames YUYV.
-                _elapsed = time.time() - _t0
-                _sleep = _READER_TARGET_DT - _elapsed
-                if _sleep > 0.001:
-                    time.sleep(_sleep)
 
         self._cam_reader_thread = threading.Thread(
             target=_camera_reader_loop,
@@ -501,7 +495,7 @@ class EyeTrackerThread(threading.Thread):
         )
         self._cam_reader_thread.start()
 
-        # Señalar que la cámara está lista
+        # Señalar que la cámara está lista (ya seteado arriba; re-set por seguridad)
         self.shared_state.camera_ready.set()
         self.shared_state.update_tracker_status(True, fps=0.0, mode="idle")
 
@@ -530,12 +524,7 @@ class EyeTrackerThread(threading.Thread):
                             self._frame_queue.get_nowait()
                         except Exception:
                             break
-                    # Esperar más tiempo: si el dispositivo USB sufrió un
-                    # disconnect/reconnect físico, el kernel necesita ~5-8s
-                    # para re-enumerar el dispositivo antes de que
-                    # VideoCapture pueda abrirlo de nuevo.
-                    log.info("⏳ Esperando re-enumeración USB (8s)...")
-                    time.sleep(8.0)
+                    time.sleep(1.0)
                     new_cap = self._open_camera(self.camera_index)
                     if new_cap is not None:
                         self.cap = new_cap
@@ -555,7 +544,8 @@ class EyeTrackerThread(threading.Thread):
             traceback.print_exc()
 
         finally:
-            self._cam_reader_stop.set()
+            if hasattr(self, '_cam_reader_stop'):
+                self._cam_reader_stop.set()
             self._cleanup()
     
     def _tracking_loop_iteration(self) -> None:

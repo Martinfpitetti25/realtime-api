@@ -907,18 +907,69 @@ REGLAS ABSOLUTAS:
     def auto_start_vision_system(self):
         """Inicia automáticamente el EyeTrackerThread y el sistema de visión"""
         try:
-            # Iniciar sistema de tracking/cámara
             self.start_camera_simple()
-            
-            self.append_message("Sistema", "🤖 Sistema de visión GPT-4 iniciado automáticamente", 'system')
         except Exception as e:
             log_vision.error(f"Error iniciando sistema automático: {e}")
-    
+
+    def _on_eye_tracker_ready(self, attempts=0):
+        """
+        Callback periódico (via root.after) para comprobar si EyeTrackerThread
+        terminó de inicializar. No bloquea el hilo principal de Tkinter.
+        """
+        POLL_INTERVAL_MS = 200
+        MAX_WAIT_MS = 35000  # 35s máximo (descarga del modelo incluida)
+
+        if self.shared_state.camera_ready.is_set():
+            status = self.shared_state.get_tracker_status()
+            if status['running']:
+                # Cámara lista y funcionando → crear ventana Tkinter para preview
+                # (Se reemplaza PreviewThread+cv2.imshow que falla en Linux con hilo de fondo)
+                self.camera_window = tk.Toplevel(self.root)
+                self.camera_window.title("📹 EyeTracker + GPT-4 Vision")
+                self.camera_window.geometry("400x350")
+                self.camera_window.configure(bg='#2c3e50')
+                self.camera_window.protocol("WM_DELETE_WINDOW", self.stop_camera_simple)
+
+                self.camera_label = tk.Label(self.camera_window, bg='#2c3e50')
+                self.camera_label.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+
+                self.camera_status = tk.Label(
+                    self.camera_window,
+                    text="👁️ EyeTracker + GPT-4V activo",
+                    font=('Arial', 9),
+                    fg='#27ae60',
+                    bg='#2c3e50'
+                )
+                self.camera_status.pack(pady=5)
+
+                self.camera_running = True
+                if hasattr(self, 'camera_button'):
+                    self.camera_button.config(text="⏹️ Cerrar", bg='#e74c3c')
+                self.update_camera_frame_simple()
+                self.start_gpt4v_refresh_thread()
+                log_vision.info("✅ EyeTrackerThread iniciado — tracking facial activo")
+                self.append_message("Sistema", "👁️ Tracking facial y GPT-4V activos", 'system')
+            else:
+                # Sin cámara pero servos y parpadeo siguen activos
+                error = status.get('error', 'desconocido')
+                log_vision.warning(f"⚠️ EyeTracker sin cámara: {error}")
+                self.append_message("Sistema", "⚠️ Sin cámara — servos y parpadeo activos", 'system')
+            return
+
+        elapsed_ms = attempts * POLL_INTERVAL_MS
+        if elapsed_ms >= MAX_WAIT_MS:
+            self.append_message("Sistema", "❌ Timeout esperando cámara del tracker", 'system')
+            return
+
+        # Seguir esperando sin bloquear
+        self.root.after(POLL_INTERVAL_MS, lambda: self._on_eye_tracker_ready(attempts + 1))
+
     def start_camera_simple(self):
         """
         Inicia el sistema de cámara usando EyeTrackerThread como dueño único.
         El EyeTrackerThread captura frames, muestra ventana de detección y comparte vía SharedState.
         GPT-4V lee frames del SharedState para análisis.
+        La espera a que la cámara esté lista es NO BLOQUEANTE (usa root.after).
         """
         if not CAMERA_AVAILABLE:
             self.append_message("Sistema", "❌ OpenCV no disponible", 'system')
@@ -932,35 +983,16 @@ REGLAS ABSOLUTAS:
             self.shared_state.reset()
             
             # Crear e iniciar el thread de tracking
-            # headless=True: el display lo maneja PreviewThread separado
             self.eye_tracker = EyeTrackerThread(
                 shared_state=self.shared_state,
                 camera_index=0,
-                headless=True,  # Siempre headless — PreviewThread hace el imshow
-                enable_servos=True  # Habilitar servos si están disponibles
+                headless=True,
+                enable_servos=True
             )
             self.eye_tracker.start()
             
-            # Esperar a que la cámara esté lista (30s para dar margen a descarga del modelo)
-            if not self.shared_state.wait_for_camera(timeout=30.0):
-                self.append_message("Sistema", "❌ Timeout esperando cámara del tracker", 'system')
-                return
-
-            # Iniciar PreviewThread desacoplado para mostrar la ventana OpenCV
-            self.preview_thread = PreviewThread(self.shared_state, fps=15)
-            self.preview_thread.start()
-            
-            log_vision.info("✅ EyeTrackerThread iniciado - Ventana de detección activa")
-            self.append_message("Sistema", "👁️ Tracking facial activo (ventana de detección visible)", 'system')
-            
-            self.camera_running = True
-            if hasattr(self, 'camera_button'):
-                self.camera_button.config(text="⏹️ Cerrar", bg='#e74c3c')
-            
-            # Iniciar thread de actualización GPT-4V (sin ventana de Tkinter)
-            self.start_gpt4v_refresh_thread()
-            
-            self.append_message("Sistema", "📹 Sistema de visión iniciado", 'system')
+            # Esperar de forma NO BLOQUEANTE usando root.after
+            self.root.after(500, lambda: self._on_eye_tracker_ready(0))
             return
         
         # ═══════════════════════════════════════════════════════════════════════
@@ -1078,12 +1110,22 @@ REGLAS ABSOLUTAS:
         return False, None
     
     def update_camera_frame_simple(self):
-        """Actualiza el frame de la cámara en la ventana Tkinter (solo para fallback)"""
+        """Actualiza el frame de la cámara en la ventana Tkinter"""
         if not self.camera_running or not self.camera_window:
             return
         
         try:
-            ret, frame = self.read_camera_frame()
+            # Usar display frame (rotado + anotado) cuando EyeTrackerThread está activo,
+            # para mostrar la imagen correctamente orientada con los bounding boxes.
+            # Para el fallback (cámara directa) se usa read_camera_frame() normal.
+            frame = None
+            ret = False
+            if EYE_TRACKER_AVAILABLE and self.shared_state and self.shared_state.is_tracker_running():
+                success, df, age = self.shared_state.get_display_frame()
+                if success and df is not None and age < 1.0:
+                    ret, frame = True, df
+            if not ret:
+                ret, frame = self.read_camera_frame()
             
             if ret and frame is not None:
                 # Redimensionar
