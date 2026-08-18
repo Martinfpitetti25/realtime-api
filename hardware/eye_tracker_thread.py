@@ -272,6 +272,36 @@ class EyeTrackerThread(threading.Thread):
         kit.servo[PIN_CUELLO_YAW].angle = CUELLO_YAW["mid"]
         kit.servo[PIN_CUELLO_PITCH].angle = CUELLO_PITCH["mid"]
     
+    def pause_servo_control(self) -> None:
+        """
+        Cede el control de los servos a otro controlador (p.ej. MotionSimulator).
+        El tracking facial sigue funcionando pero no mueve ningún servo.
+        """
+        self.enable_servos = False
+        # Detener parpadeo para evitar conflicto con el simulador
+        self._blink_stop.set()
+        log.info("⏸️ Control de servos cedido — EyeTracker en modo observación")
+
+    def resume_servo_control(self) -> None:
+        """
+        Recupera el control de los servos después de que otro controlador termine.
+        Reinicia el BlinkThread automáticamente.
+        """
+        if not SERVO_AVAILABLE:
+            return
+        self.enable_servos = True
+        # Reiniciar blink thread si no está corriendo
+        self._blink_stop.clear()
+        if not (self._blink_thread and self._blink_thread.is_alive()):
+            self._blink_thread = threading.Thread(
+                target=self._blink_loop,
+                daemon=True,
+                name="BlinkThread"
+            )
+            self._blink_thread.start()
+            log.info("✅ BlinkThread reiniciado")
+        log.info("▶️ Control de servos recuperado por EyeTracker")
+
     def _apply_eyes(self, lh: float, lv: float, rh: float, rv: float) -> None:
         """Aplica ángulos a los servos de los ojos."""
         if not self.enable_servos:
@@ -467,14 +497,20 @@ class EyeTrackerThread(threading.Thread):
         import queue as _qmod
         self._frame_queue: _qmod.Queue = _qmod.Queue(maxsize=2)
         self._cam_reader_stop = threading.Event()
+        self._cam_lock = threading.Lock()  # Protege el reemplazo de self.cap
 
-        def _camera_reader_loop():
-            while not self._cam_reader_stop.is_set():
-                if self.cap is None or not self.cap.isOpened():
+        def _camera_reader_loop(stop_event: threading.Event, local_cap):
+            """Reader que trabaja con una referencia local a cap para evitar race conditions.
+            Cuando se necesita reconectar, el thread se detiene (stop_event) y se lanza uno nuevo."""
+            consecutive_failures = 0
+            while not stop_event.is_set():
+                if local_cap is None or not local_cap.isOpened():
+                    log.debug("CameraReader: cap no disponible, esperando...")
                     time.sleep(0.05)
                     continue
-                ok, frm = self.cap.read()
+                ok, frm = local_cap.read()
                 if ok:
+                    consecutive_failures = 0
                     # Drop frame si la cola está llena (preferir frame fresco)
                     if self._frame_queue.full():
                         try:
@@ -486,14 +522,20 @@ class EyeTrackerThread(threading.Thread):
                     except Exception:
                         pass
                 else:
-                    time.sleep(0.01)
+                    consecutive_failures += 1
+                    if consecutive_failures >= 10:
+                        log.warning(f"CameraReader: {consecutive_failures} fallos consecutivos leyendo frame")
+                    time.sleep(0.05)
 
+        self._cam_reader_stop_event = threading.Event()
         self._cam_reader_thread = threading.Thread(
             target=_camera_reader_loop,
+            args=(self._cam_reader_stop_event, self.cap),
             daemon=True,
             name="CameraReader"
         )
         self._cam_reader_thread.start()
+        self._camera_reader_loop_fn = _camera_reader_loop  # Guardar para reiniciar
 
         # Señalar que la cámara está lista (ya seteado arriba; re-set por seguridad)
         self.shared_state.camera_ready.set()
@@ -512,28 +554,57 @@ class EyeTrackerThread(threading.Thread):
                 # Watchdog: si no llega ningún frame en 5s → reconectar cámara
                 if time.time() - self._last_frame_time > 5.0:
                     log.warning("⚠️ Stall de cámara detectado (5s sin frames) — reconectando...")
+                    self.shared_state.update_tracker_status(True, self.current_fps, "reconnecting")
+
+                    # 1. Señalar al reader actual que pare
+                    self._cam_reader_stop_event.set()
+
+                    # 2. Liberar cap (desbloquea cap.read() bloqueado en Linux/V4L2)
                     old_cap = self.cap
                     self.cap = None
                     try:
-                        old_cap.release()
-                    except Exception:
-                        pass
-                    # Vaciar cola
+                        if old_cap:
+                            old_cap.release()
+                            log.debug("CameraReader: cap anterior liberado")
+                    except Exception as e:
+                        log.warning(f"Error liberando cap anterior: {e}")
+
+                    # 3. Esperar a que el reader viejo termine (máx 3s)
+                    if self._cam_reader_thread and self._cam_reader_thread.is_alive():
+                        self._cam_reader_thread.join(timeout=3.0)
+                        if self._cam_reader_thread.is_alive():
+                            log.warning("⚠️ CameraReader viejo no terminó en 3s — continuando de todas formas")
+
+                    # 4. Vaciar cola de frames obsoletos
                     while not self._frame_queue.empty():
                         try:
                             self._frame_queue.get_nowait()
                         except Exception:
                             break
+
                     time.sleep(1.0)
+
+                    # 5. Abrir nueva cámara
                     new_cap = self._open_camera(self.camera_index)
                     if new_cap is not None:
                         self.cap = new_cap
                         self._last_frame_time = time.time()
-                        log.info("✅ Cámara reconectada")
+
+                        # 6. Arrancar nuevo CameraReader con la nueva cap
+                        self._cam_reader_stop_event = threading.Event()
+                        self._cam_reader_thread = threading.Thread(
+                            target=self._camera_reader_loop_fn,
+                            args=(self._cam_reader_stop_event, self.cap),
+                            daemon=True,
+                            name="CameraReader"
+                        )
+                        self._cam_reader_thread.start()
+                        log.info("✅ Cámara reconectada — nuevo CameraReader iniciado")
+                        self.shared_state.update_tracker_status(True, self.current_fps, "idle")
                     else:
                         log.error("❌ No se pudo reconectar la cámara — esperando 5s...")
-                        time.sleep(5.0)
                         self._last_frame_time = time.time()  # Reset para no spamear
+                        time.sleep(5.0)
                     continue
 
                 self._tracking_loop_iteration()
@@ -544,8 +615,8 @@ class EyeTrackerThread(threading.Thread):
             traceback.print_exc()
 
         finally:
-            if hasattr(self, '_cam_reader_stop'):
-                self._cam_reader_stop.set()
+            if hasattr(self, '_cam_reader_stop_event'):
+                self._cam_reader_stop_event.set()
             self._cleanup()
     
     def _tracking_loop_iteration(self) -> None:
@@ -868,9 +939,19 @@ class EyeTrackerThread(threading.Thread):
             except Exception:
                 pass
         
-        # Liberar cámara
+        # Liberar cámara PRIMERO (desbloquea local_cap.read() en el CameraReader)
         if self.cap:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        # Ahora sí parar y esperar al CameraReader (ya no está bloqueado en cap.read())
+        if hasattr(self, '_cam_reader_stop_event'):
+            self._cam_reader_stop_event.set()
+        if hasattr(self, '_cam_reader_thread') and self._cam_reader_thread and self._cam_reader_thread.is_alive():
+            self._cam_reader_thread.join(timeout=2.0)
 
         # Las ventanas OpenCV las cierra PreviewThread (no llamar destroyAllWindows aquí)
         

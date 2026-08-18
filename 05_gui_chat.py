@@ -81,6 +81,17 @@ except ImportError as e:
     log_vision.warning(f"⚠️ EyeTrackerThread no disponible: {e}")
 
 # ══════════════════════════════════════════════════════════════════════════════
+# SIMULADOR DE MOVIMIENTO NATURAL (MotionSimulator)
+# ══════════════════════════════════════════════════════════════════════════════
+try:
+    from hardware.motion_simulator import MotionSimulator
+    MOTION_SIMULATOR_AVAILABLE = True
+    log_vision.info("✅ MotionSimulator disponible")
+except ImportError as e:
+    MOTION_SIMULATOR_AVAILABLE = False
+    log_vision.warning(f"⚠️ MotionSimulator no disponible: {e}")
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SISTEMA DE CONTROL DE BOCA (MouthController)
 # ══════════════════════════════════════════════════════════════════════════════
 try:
@@ -141,13 +152,13 @@ load_dotenv()
 
 # Configuración
 API_KEY = os.getenv('OPENAI_API_KEY')
-# Modelo flagship de voz (gpt-realtime-1.5 - el mejor para audio in/out, reemplaza gpt-4o-realtime-preview)
-MODEL = 'gpt-realtime-1.5'
+# Modelo mini para testing (gpt-realtime-2.1-mini - más económico, cambiar a gpt-realtime-2.1 en producción)
+MODEL = 'gpt-realtime-2.1-mini'
 URL = f'wss://api.openai.com/v1/realtime?model={MODEL}'
 
-# Precios por 1M tokens (gpt-realtime-1.5)
+# Precios por 1M tokens (gpt-realtime-2.1)
 PRICE_INPUT = 4.00   # Text input $4.00 / Audio input $32.00
-PRICE_OUTPUT = 16.00  # Text output $16.00 / Audio output $64.00
+PRICE_OUTPUT = 24.00  # Text output $24.00 / Audio output $64.00
 
 # Configuración de audio optimizada para máxima fluidez y BAJA LATENCIA
 # OPTIMIZADO: CHUNK reducido para menor latencia (~21ms) - balance latencia/CPU
@@ -272,6 +283,10 @@ class RealtimeGUIChat:
         self.shared_state = SharedState() if EYE_TRACKER_AVAILABLE else None
         self.eye_tracker = None
         self.preview_thread = None  # PreviewThread desacoplado para cv2.imshow
+
+        # Simulador de movimiento natural (fallback cuando no hay tracking)
+        self.motion_simulator = None
+        self.simulation_running = False
         self.camera_cap = None  # DEPRECATED: ya no se usa directamente
         self.gpt4v_service = GPT4VisionService() if GPT4V_AVAILABLE else None
         self.camera_window = None
@@ -911,6 +926,72 @@ REGLAS ABSOLUTAS:
         except Exception as e:
             log_vision.error(f"Error iniciando sistema automático: {e}")
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # SIMULACIÓN DE MOVIMIENTO NATURAL
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def toggle_simulation(self):
+        """
+        Activa/desactiva la simulación de movimiento natural del robot.
+
+        Al activar:
+          - Si EyeTrackerThread está corriendo, le cede el control de servos
+            (sigue detectando caras pero no mueve motores).
+          - Inicia MotionSimulator con movimiento orgánico (ondas + sácadas + parpadeo).
+
+        Al desactivar:
+          - Detiene MotionSimulator (centra servos suavemente).
+          - Si EyeTrackerThread está corriendo, recupera el control de servos.
+        """
+        if self.simulation_running:
+            # ── DETENER ──────────────────────────────────────────────────
+            if self.motion_simulator:
+                self.motion_simulator.stop()
+                self.motion_simulator = None
+            self.simulation_running = False
+
+            if hasattr(self, 'sim_button'):
+                self.sim_button.config(
+                    text="🎭 Simulación",
+                    bg='#2980b9',
+                    relief=tk.FLAT
+                )
+
+            # Devolver control al eye tracker si está activo
+            if self.eye_tracker and self.eye_tracker.is_alive():
+                self.eye_tracker.resume_servo_control()
+                self.append_message("Sistema", "▶️ Simulación detenida — tracking facial recuperado", 'system')
+            else:
+                self.append_message("Sistema", "⏹️ Simulación de movimiento detenida", 'system')
+
+            log.info("🎭 MotionSimulator detenido")
+
+        else:
+            # ── INICIAR ──────────────────────────────────────────────────
+            if not MOTION_SIMULATOR_AVAILABLE:
+                self.append_message("Sistema", "❌ MotionSimulator no disponible (falta adafruit_servokit?)", 'system')
+                return
+
+            # Ceder control de servos al simulador si el eye tracker está corriendo
+            if self.eye_tracker and self.eye_tracker.is_alive():
+                self.eye_tracker.pause_servo_control()
+
+            self.motion_simulator = MotionSimulator()
+            self.motion_simulator.start()
+            self.simulation_running = True
+
+            if hasattr(self, 'sim_button'):
+                self.sim_button.config(
+                    text="⏹️ Detener Sim",
+                    bg='#e74c3c',
+                    relief=tk.SUNKEN
+                )
+
+            self.append_message("Sistema",
+                "🎭 Simulación de movimiento activa — ojos y cuello en movimiento natural",
+                'system')
+            log.info("🎭 MotionSimulator iniciado")
+
     def _on_eye_tracker_ready(self, attempts=0):
         """
         Callback periódico (via root.after) para comprobar si EyeTrackerThread
@@ -926,12 +1007,13 @@ REGLAS ABSOLUTAS:
                 # (Se reemplaza PreviewThread+cv2.imshow que falla en Linux con hilo de fondo)
                 self.camera_window = tk.Toplevel(self.root)
                 self.camera_window.title("📹 EyeTracker + GPT-4 Vision")
-                self.camera_window.geometry("400x350")
+                self.camera_window.geometry("640x480")
+                self.camera_window.resizable(True, True)
                 self.camera_window.configure(bg='#2c3e50')
                 self.camera_window.protocol("WM_DELETE_WINDOW", self.stop_camera_simple)
 
                 self.camera_label = tk.Label(self.camera_window, bg='#2c3e50')
-                self.camera_label.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+                self.camera_label.pack(expand=True, fill=tk.BOTH)
 
                 self.camera_status = tk.Label(
                     self.camera_window,
@@ -1012,13 +1094,14 @@ REGLAS ABSOLUTAS:
         # Crear ventana de video (solo fallback)
         self.camera_window = tk.Toplevel(self.root)
         self.camera_window.title("📹 GPT-4 Vision Feed")
-        self.camera_window.geometry("400x350")
+        self.camera_window.geometry("640x480")
+        self.camera_window.resizable(True, True)
         self.camera_window.configure(bg='#2c3e50')
         self.camera_window.protocol("WM_DELETE_WINDOW", self.stop_camera_simple)
         
         # Label para el video
         self.camera_label = tk.Label(self.camera_window, bg='#2c3e50')
-        self.camera_label.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+        self.camera_label.pack(expand=True, fill=tk.BOTH)
         
         # Status label
         self.camera_status = tk.Label(
@@ -1127,13 +1210,32 @@ REGLAS ABSOLUTAS:
             if not ret:
                 ret, frame = self.read_camera_frame()
             
+            # Intentar obtener frame fresco; si no hay, usar el último conocido
+            if not ret or frame is None:
+                # Sin frame fresco — verificar si el tracker sigue vivo y mostrar estado
+                if EYE_TRACKER_AVAILABLE and self.shared_state:
+                    status = self.shared_state.get_tracker_status()
+                    mode = status.get('mode', '')
+                    if mode == 'reconnecting':
+                        log_vision.debug("GUI: cámara reconectando...")
+                        if self.camera_status:
+                            self.camera_status.config(text="🔄 Reconectando cámara...", fg='#e67e22')
+                    # Intentar mostrar el último display frame aunque sea viejo (sin límite de age)
+                    success, df, age = self.shared_state.get_display_frame()
+                    if success and df is not None:
+                        ret, frame = True, df
+                        log_vision.debug(f"GUI: usando frame antiguo (age={age:.1f}s)")
+
             if ret and frame is not None:
-                # Redimensionar
+                # Redimensionar al tamaño actual de la ventana
                 height, width = frame.shape[:2]
-                max_width = 380
-                max_height = 220
+                win_w = self.camera_label.winfo_width()
+                win_h = self.camera_label.winfo_height()
+                # Fallback si la ventana aún no tiene dimensiones reales
+                if win_w < 10 or win_h < 10:
+                    win_w, win_h = 640, 460
                 
-                scale = min(max_width / width, max_height / height)
+                scale = min(win_w / width, win_h / height)
                 new_width = int(width * scale)
                 new_height = int(height * scale)
                 
@@ -1153,10 +1255,18 @@ REGLAS ABSOLUTAS:
             # Optimizado: 15 FPS en lugar de 30 FPS (más liviano, igual de fluido)
             self.camera_window.after(66, self.update_camera_frame_simple)
             
+        except tk.TclError:
+            # Ventana destruida — detener el loop silenciosamente
+            return
         except Exception as e:
+            log_vision.warning(f"Error en update_camera_frame_simple: {e}")
             if self.camera_status:
-                self.camera_status.config(text=f"❌ Error: {str(e)}", fg='#e74c3c')
-            self.camera_window.after(100, self.update_camera_frame_simple)
+                try:
+                    self.camera_status.config(text=f"❌ Error: {str(e)}", fg='#e74c3c')
+                except tk.TclError:
+                    return
+            if self.camera_window:
+                self.camera_window.after(200, self.update_camera_frame_simple)
     
     def start_gpt4v_refresh_thread(self):
         """Inicia thread de actualización periódica GPT-4V"""
@@ -1638,6 +1748,22 @@ REGLAS ABSOLUTAS:
             )
             btn.pack(side=tk.LEFT, padx=3, pady=4)
             self._personality_buttons[p_name] = btn
+
+        # ── BOTÓN SIMULACIÓN DE MOVIMIENTO ────────────────────────────────────
+        if MOTION_SIMULATOR_AVAILABLE or EYE_TRACKER_AVAILABLE:
+            self.sim_button = tk.Button(
+                personality_frame,
+                text="🎭 Simulación",
+                command=self.toggle_simulation,
+                bg='#2980b9',
+                fg='white',
+                font=('Arial', 9, 'bold'),
+                relief=tk.FLAT,
+                cursor='hand2',
+                padx=12,
+                pady=3
+            )
+            self.sim_button.pack(side=tk.RIGHT, padx=(3, 8), pady=4)
 
         # Entrada
         self.input_frame = tk.Frame(self.root, bg='#f0f0f0')
@@ -2158,6 +2284,9 @@ REGLAS ABSOLUTAS:
                 "type": "realtime",                 # REQUERIDO en GA API
                 "output_modalities": ["audio"],       # Siempre audio: reproduce voz Y muestra transcripción en chat
                 "instructions": self.instructions,
+                "reasoning": {
+                    "effort": "low"                  # gpt-realtime-2.1: low=responsivo, medium/high para tareas complejas
+                },
                 "audio": {
                     "output": {
                         "format": {
@@ -3758,63 +3887,97 @@ REGLAS ABSOLUTAS:
         threading.Thread(target=analyze, daemon=True).start()
     
     def on_closing(self):
-        """Cerrar aplicación correctamente"""
+        """Cerrar aplicación correctamente — corre limpieza en un thread para no bloquear Tkinter"""
+        import os as _os, threading as _thr
         log.info("🛑 Cerrando aplicación...")
-        
-        self.recording = False
-        
-        # ═══════════════════════════════════════════════════════════════════════
-        # DETENER EyeTrackerThread PRIMERO (para liberar la cámara)
-        # ═══════════════════════════════════════════════════════════════════════
-        if self.eye_tracker and self.eye_tracker.is_alive():
-            log.info("🛑 Deteniendo EyeTrackerThread...")
-            self.eye_tracker.stop()
-            self.eye_tracker.join(timeout=5.0)
-            self.eye_tracker = None
-            log.info("✅ EyeTrackerThread detenido")
-        
-        # Detener cámara si está activa (fallback)
-        if self.camera_running:
-            try:
-                self.camera_running = False
-                if self.camera_cap:
-                    self.camera_cap.release()
-                    self.camera_cap = None
-            except:
-                pass
-        
-        # Cerrar ventana de cámara
-        if self.camera_window:
-            try:
-                self.camera_window.destroy()
-            except:
-                pass
-        
-        # Cerrar WebSocket
-        if self.ws:
-            try:
-                self.ws.close()
-            except:
-                pass
-        
-        # Terminar audio
-        if self.audio:
-            try:
-                self.audio.terminate()
-            except:
-                pass
-        
-        # Limpiar controlador de boca
-        if self.mouth_controller:
-            try:
-                self.mouth_controller.cleanup()
-                log.info("✅ MouthController cerrado")
-            except:
-                pass
-        
-        # Destruir ventana
-        self.root.destroy()
-        log.info("✅ Aplicación cerrada")
+
+        # Ocultar ventana principal inmediatamente para que el usuario sepa que se registró el clic
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+
+        # Timer de emergencia: 6s para cierre limpio, luego os._exit
+        def _force_exit():
+            log.warning("⚠️ Cierre forzado por timeout (6s)")
+            _os._exit(0)
+        _kill_timer = _thr.Timer(6.0, _force_exit)
+        _kill_timer.daemon = True
+        _kill_timer.start()
+
+        def _do_cleanup():
+            # ═══════════════════════════════════════════════════════════════════════
+            # DETENER MotionSimulator (antes que el eye tracker)
+            # ═══════════════════════════════════════════════════════════════════════
+            if self.motion_simulator:
+                log.info("🛑 Deteniendo MotionSimulator...")
+                self.motion_simulator.stop()
+                self.motion_simulator = None
+
+            # ═══════════════════════════════════════════════════════════════════════
+            # DETENER EyeTrackerThread PRIMERO (para liberar la cámara)
+            # ═══════════════════════════════════════════════════════════════════════
+            if self.eye_tracker and self.eye_tracker.is_alive():
+                log.info("🛑 Deteniendo EyeTrackerThread...")
+                self.eye_tracker.stop()
+                self.eye_tracker.join(timeout=4.0)
+                self.eye_tracker = None
+                log.info("✅ EyeTrackerThread detenido")
+
+            # Detener cámara si está activa (fallback)
+            if self.camera_running:
+                try:
+                    self.camera_running = False
+                    if self.camera_cap:
+                        self.camera_cap.release()
+                        self.camera_cap = None
+                except Exception:
+                    pass
+
+            # Cerrar ventana de cámara
+            if self.camera_window:
+                try:
+                    self.camera_window.destroy()
+                except Exception:
+                    pass
+
+            # Cerrar WebSocket
+            if self.ws:
+                try:
+                    ws_ref = self.ws
+                    self.ws = None
+                    self.connected = False
+                    _t = _thr.Thread(target=ws_ref.close, daemon=True)
+                    _t.start()
+                    _t.join(timeout=1.5)
+                except Exception:
+                    pass
+
+            # Terminar audio
+            if self.audio:
+                try:
+                    audio_ref = self.audio
+                    self.audio = None
+                    _t = _thr.Thread(target=audio_ref.terminate, daemon=True)
+                    _t.start()
+                    _t.join(timeout=1.5)
+                except Exception:
+                    pass
+
+            # Limpiar controlador de boca
+            if self.mouth_controller:
+                try:
+                    self.mouth_controller.cleanup()
+                    log.info("✅ MouthController cerrado")
+                except Exception:
+                    pass
+
+            # Cancelar timer de emergencia (cierre limpio completado)
+            _kill_timer.cancel()
+            log.info("✅ Aplicación cerrada")
+            _os._exit(0)
+
+        _thr.Thread(target=_do_cleanup, daemon=True, name="CleanupThread").start()
 
 def main():
     root = tk.Tk()
