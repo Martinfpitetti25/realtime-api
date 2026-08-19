@@ -1003,34 +1003,69 @@ REGLAS ABSOLUTAS:
         if self.shared_state.camera_ready.is_set():
             status = self.shared_state.get_tracker_status()
             if status['running']:
-                # Cámara lista y funcionando → crear ventana Tkinter para preview
-                # (Se reemplaza PreviewThread+cv2.imshow que falla en Linux con hilo de fondo)
+                # Cámara lista — ventana dark mode con HUD
                 self.camera_window = tk.Toplevel(self.root)
-                self.camera_window.title("📹 EyeTracker + GPT-4 Vision")
-                self.camera_window.geometry("640x480")
+                self.camera_window.title("👁 Frank — Vision")
+                self.camera_window.geometry("660x560")
                 self.camera_window.resizable(True, True)
-                self.camera_window.configure(bg='#2c3e50')
+                self.camera_window.configure(bg=self.C['bg'])
                 self.camera_window.protocol("WM_DELETE_WINDOW", self.stop_camera_simple)
 
-                self.camera_label = tk.Label(self.camera_window, bg='#2c3e50')
-                self.camera_label.pack(expand=True, fill=tk.BOTH)
+                self.camera_label = tk.Label(self.camera_window,
+                                             bg=self.C['bg'], cursor='crosshair')
+                self.camera_label.pack(expand=True, fill=tk.BOTH, padx=6, pady=(6, 0))
 
-                self.camera_status = tk.Label(
-                    self.camera_window,
-                    text="👁️ EyeTracker + GPT-4V activo",
-                    font=('Arial', 9),
-                    fg='#27ae60',
-                    bg='#2c3e50'
-                )
-                self.camera_status.pack(pady=5)
+                # ── HUD inferior (E + H) ──────────────────────────────────────
+                hud_frame = tk.Frame(self.camera_window, bg=self.C['bg2'],
+                                     highlightbackground=self.C['border'],
+                                     highlightthickness=1)
+                hud_frame.pack(fill=tk.X, padx=6, pady=(4, 6))
+
+                # Modo tracker (izq)
+                self._cam_mode_label = tk.Label(hud_frame, text="⚪ Idle",
+                    font=('Consolas', 9, 'bold'), fg=self.C['text_dim'],
+                    bg=self.C['bg2'])
+                self._cam_mode_label.pack(side=tk.LEFT, padx=(10, 0), pady=6)
+
+                # FPS (izq)
+                self._cam_fps_label = tk.Label(hud_frame, text="0 fps",
+                    font=('Consolas', 8), fg=self.C['text_dim'], bg=self.C['bg2'])
+                self._cam_fps_label.pack(side=tk.LEFT, padx=(8, 0), pady=6)
+
+                # Barra de confianza (centro, H)
+                tk.Label(hud_frame, text="CONF",
+                    font=('Consolas', 7), fg=self.C['text_dim'],
+                    bg=self.C['bg2']).pack(side=tk.LEFT, padx=(14, 4), pady=6)
+
+                self._conf_canvas = tk.Canvas(hud_frame, width=120, height=10,
+                    bg=self.C['bg3'], highlightthickness=0)
+                self._conf_canvas.pack(side=tk.LEFT, pady=6)
+                self._conf_bar = self._conf_canvas.create_rectangle(
+                    0, 0, 0, 10, fill=self.C['green'], outline='')
+                self._conf_pct = tk.Label(hud_frame, text="0%",
+                    font=('Consolas', 8), fg=self.C['text'], bg=self.C['bg2'],
+                    width=4)
+                self._conf_pct.pack(side=tk.LEFT, padx=(4, 0))
+
+                # Ícono ojo (parpadea con el robot, H)
+                self._cam_eye_label = tk.Label(hud_frame, text="👁",
+                    font=('Consolas', 12), fg=self.C['green'], bg=self.C['bg2'])
+                self._cam_eye_label.pack(side=tk.LEFT, padx=(6, 0))
+
+                # GPT-4V status (der)
+                self.camera_status = tk.Label(hud_frame,
+                    text="GPT-4V standby",
+                    font=('Consolas', 8), fg=self.C['text_dim'], bg=self.C['bg2'])
+                self.camera_status.pack(side=tk.RIGHT, padx=(0, 10), pady=6)
 
                 self.camera_running = True
                 if hasattr(self, 'camera_button'):
-                    self.camera_button.config(text="⏹️ Cerrar", bg='#e74c3c')
+                    self.camera_button.config(text="⏹ Cerrar", bg=self.C['red'])
                 self.update_camera_frame_simple()
                 self.start_gpt4v_refresh_thread()
+                self._update_cam_hud()   # arrancar loop HUD
                 log_vision.info("✅ EyeTrackerThread iniciado — tracking facial activo")
-                self.append_message("Sistema", "👁️ Tracking facial y GPT-4V activos", 'system')
+                self.append_message("Sistema", "👁 Tracking facial y GPT-4V activos", 'system')
             else:
                 # Sin cámara pero servos y parpadeo siguen activos
                 error = status.get('error', 'desconocido')
@@ -1267,7 +1302,57 @@ REGLAS ABSOLUTAS:
                     return
             if self.camera_window:
                 self.camera_window.after(200, self.update_camera_frame_simple)
-    
+
+    def _update_cam_hud(self):
+        """Actualiza el HUD de la ventana de cámara a 10 Hz (E + H)."""
+        if not self.camera_running or not self.camera_window:
+            return
+        try:
+            C = self.C
+            _mode_icons = {
+                'follow':        ('🎯 Follow',   C['green']),
+                'search':        ('🔍 Search',   C['yellow']),
+                'center':        ('⚙ Center',    C['accent']),
+                'active_search': ('🔍 Active',   C['orange']),
+                'idle':          ('⚪ Idle',      C['text_dim']),
+                'reconnecting':  ('🔄 Reconect', C['red']),
+            }
+            if EYE_TRACKER_AVAILABLE and self.shared_state:
+                st = self.shared_state.get_tracker_status()
+                mode = st.get('mode', 'idle')
+                fps  = st.get('fps', 0.0)
+                label_txt, label_col = _mode_icons.get(mode, ('⚪ Idle', C['text_dim']))
+                if hasattr(self, '_cam_mode_label'):
+                    self._cam_mode_label.config(text=label_txt, fg=label_col)
+                if hasattr(self, '_cam_fps_label'):
+                    self._cam_fps_label.config(
+                        text=f"{fps:.0f} fps",
+                        fg=C['green'] if fps > 20 else C['yellow'] if fps > 10 else C['red'])
+                # Barra de confianza (H)
+                face = self.shared_state.get_face_data()
+                conf = face.confidence if (face and face.detected) else 0.0
+                pct  = int(conf * 100)
+                bar_w = int(conf * 120)
+                bar_col = (C['green'] if pct > 70 else C['yellow'] if pct > 40 else C['red'])
+                if hasattr(self, '_conf_canvas'):
+                    self._conf_canvas.coords(self._conf_bar, 0, 0, bar_w, 10)
+                    self._conf_canvas.itemconfig(self._conf_bar, fill=bar_col)
+                if hasattr(self, '_conf_pct'):
+                    self._conf_pct.config(
+                        text=f"{pct}%",
+                        fg=bar_col if pct > 0 else C['text_dim'])
+                # Ícono ojo: parpadea cuando el robot parpadea (sincronizado con blink state)
+                if hasattr(self, '_cam_eye_label'):
+                    eye_open = True
+                    if self.eye_tracker and hasattr(self.eye_tracker, 'blink_phase'):
+                        eye_open = (self.eye_tracker.blink_phase == 'IDLE')
+                    self._cam_eye_label.config(
+                        text='👁' if eye_open else '—',
+                        fg=C['green'] if (face and face.detected) else C['text_dim'])
+        except Exception:
+            pass
+        self.camera_window.after(100, self._update_cam_hud)
+
     def start_gpt4v_refresh_thread(self):
         """Inicia thread de actualización periódica GPT-4V"""
         if self.gpt4v_thread and self.gpt4v_thread.is_alive():
@@ -1529,292 +1614,349 @@ REGLAS ABSOLUTAS:
             self._schedule_next_vision_update
         )
     
+    # ══════════════════════════════════════════════════════════════════════════
+    # PALETA DARK MODE
+    # ══════════════════════════════════════════════════════════════════════════
+    C = {
+        'bg':        '#0d1117',   # Fondo principal
+        'bg2':       '#161b22',   # Fondo secundario (paneles)
+        'bg3':       '#21262d',   # Fondo terciario (inputs, cards)
+        'border':    '#30363d',   # Bordes sutiles
+        'text':      '#e6edf3',   # Texto principal
+        'text_dim':  '#7d8590',   # Texto secundario
+        'accent':    '#58a6ff',   # Acento azul (usuario)
+        'green':     '#3fb950',   # Verde (asistente / activo)
+        'orange':    '#d29922',   # Naranja (advertencia)
+        'red':       '#f85149',   # Rojo (error / detener)
+        'purple':    '#bc8cff',   # Púrpura (personalidad)
+        'teal':      '#39d353',   # Verde teal (cámara)
+        'yellow':    '#e3b341',   # Amarillo (atención)
+    }
+
+    def _btn(self, parent, text, command, color, **kw):
+        """Helper: botón dark mode con hover suave."""
+        b = tk.Button(
+            parent, text=text, command=command,
+            bg=color, fg='white',
+            font=('Consolas', 9, 'bold'),
+            relief=tk.FLAT, cursor='hand2',
+            activebackground=color, activeforeground='white',
+            bd=0, highlightthickness=0,
+            **kw
+        )
+        # Hover effect: aclarar levemente
+        def _on_enter(e, w=b, c=color):
+            r = int(c[1:3], 16); g = int(c[3:5], 16); bl = int(c[5:7], 16)
+            r2 = min(255, r + 30); g2 = min(255, g + 30); bl2 = min(255, bl + 30)
+            w.config(bg=f'#{r2:02x}{g2:02x}{bl2:02x}')
+        def _on_leave(e, w=b, c=color):
+            w.config(bg=c)
+        b.bind('<Enter>', _on_enter)
+        b.bind('<Leave>', _on_leave)
+        return b
+
     def setup_ui(self):
-        """Crea la interfaz"""
-        # Header
-        header_frame = tk.Frame(self.root, bg='#2c3e50', height=80)
-        header_frame.pack(fill=tk.X, padx=0, pady=0)
+        """Crea la interfaz — Dark mode profesional."""
+        C = self.C
+        self.root.configure(bg=C['bg'])
+
+        # ══════════════════════════════════════════════════════════════════════
+        # HEADER  (C — LEDs animados)
+        # ══════════════════════════════════════════════════════════════════════
+        header_frame = tk.Frame(self.root, bg=C['bg2'], height=72)
+        header_frame.pack(fill=tk.X)
         header_frame.pack_propagate(False)
-        
-        # Estado
-        self.status_label = tk.Label(
-            header_frame,
-            text="● Desconectado",
-            font=('Arial', 11, 'bold'),
-            fg='#e74c3c',
-            bg='#2c3e50'
-        )
-        self.status_label.pack(pady=(10, 5))
-        
-        # Monitor
-        self.stats_label = tk.Label(
-            header_frame,
-            text="Tokens: 0 entrada, 0 salida | Costo: $0.0000",
-            font=('Arial', 9),
-            fg='#ecf0f1',
-            bg='#2c3e50'
-        )
-        self.stats_label.pack()
-        
-        # Modelo
-        model_label = tk.Label(
-            header_frame,
-            text=f"Modelo: {MODEL}",
-            font=('Arial', 8),
-            fg='#95a5a6',
-            bg='#2c3e50'
-        )
-        model_label.pack()
-        
-        # PANEL DE ESTADO VISUAL (Nuevo)
-        self.status_panel = tk.Frame(self.root, bg='#34495e', height=50)
-        self.status_panel.pack(fill=tk.X, padx=0, pady=0)
-        self.status_panel.pack_propagate(False)
-        
-        # Indicador de estado del asistente
-        self.activity_label = tk.Label(
-            self.status_panel,
-            text="⚪ Inactivo",
-            font=('Arial', 10, 'bold'),
-            fg='#95a5a6',
-            bg='#34495e'
-        )
-        self.activity_label.pack(side=tk.LEFT, padx=20, pady=10)
-        
-        # Barra de volumen (canvas para animación)
-        self.volume_canvas = tk.Canvas(
-            self.status_panel,
-            width=200,
-            height=30,
-            bg='#2c3e50',
-            highlightthickness=0
-        )
-        self.volume_canvas.pack(side=tk.LEFT, padx=10)
-        
-        # Crear barras de volumen (10 barras)
+
+        # Columna izquierda: LED + estado
+        led_col = tk.Frame(header_frame, bg=C['bg2'])
+        led_col.pack(side=tk.LEFT, padx=(16, 0), pady=8)
+
+        # Canvas LED animado (círculo pulsante)
+        self._led_canvas = tk.Canvas(led_col, width=18, height=18,
+                                     bg=C['bg2'], highlightthickness=0)
+        self._led_canvas.pack(side=tk.LEFT, padx=(0, 6))
+        self._led_circle = self._led_canvas.create_oval(2, 2, 16, 16,
+                                                         fill=C['red'], outline='')
+        self._led_pulse_state = 0
+        self._animate_led()
+
+        self.status_label = tk.Label(led_col, text="Desconectado",
+                                     font=('Consolas', 11, 'bold'),
+                                     fg=C['red'], bg=C['bg2'])
+        self.status_label.pack(side=tk.LEFT)
+
+        # Columna central: modelo + stats
+        center_col = tk.Frame(header_frame, bg=C['bg2'])
+        center_col.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=20)
+
+        model_label = tk.Label(center_col, text=f"  {MODEL}",
+                                font=('Consolas', 9), fg=C['text_dim'], bg=C['bg2'])
+        model_label.pack(anchor='center')
+
+        self.stats_label = tk.Label(center_col,
+                                    text="Tokens: 0 in / 0 out  |  Costo: $0.0000",
+                                    font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self.stats_label.pack(anchor='center')
+
+        # Columna derecha: actividad + VU meter
+        right_col = tk.Frame(header_frame, bg=C['bg2'])
+        right_col.pack(side=tk.RIGHT, padx=(0, 16), pady=8)
+
+        self.activity_label = tk.Label(right_col, text="⚪  Inactivo",
+                                       font=('Consolas', 9, 'bold'),
+                                       fg=C['text_dim'], bg=C['bg2'])
+        self.activity_label.pack(anchor='e')
+
+        # VU meter rediseñado: 12 barras, gradiente tricolor
+        self.volume_canvas = tk.Canvas(right_col, width=144, height=18,
+                                       bg=C['bg2'], highlightthickness=0)
+        self.volume_canvas.pack(anchor='e', pady=(4, 0))
         self.volume_bars = []
-        bar_width = 15
-        bar_gap = 5
-        for i in range(10):
-            x = i * (bar_width + bar_gap)
+        for i in range(12):
+            x = i * 12
+            if i < 7:
+                col = C['green']
+            elif i < 10:
+                col = C['yellow']
+            else:
+                col = C['red']
             bar = self.volume_canvas.create_rectangle(
-                x, 30, x + bar_width, 30,
-                fill='#27ae60',
-                outline=''
-            )
-            self.volume_bars.append(bar)
-        
-        # Iniciar animación de volumen
+                x, 18, x + 9, 18, fill=C['border'], outline='')
+            self.volume_bars.append((bar, col))
         self.current_volume_level = 0
         self.animate_volume()
-        
-        # Chat
-        chat_frame = tk.Frame(self.root, bg='#ffffff')
-        chat_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
+
+        # ══════════════════════════════════════════════════════════════════════
+        # SEPARADOR
+        # ══════════════════════════════════════════════════════════════════════
+        tk.Frame(self.root, bg=C['border'], height=1).pack(fill=tk.X)
+
+        # ══════════════════════════════════════════════════════════════════════
+        # CUERPO PRINCIPAL: chat (izq) + panel lateral (der) — B
+        # ══════════════════════════════════════════════════════════════════════
+        body_frame = tk.Frame(self.root, bg=C['bg'])
+        body_frame.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+
+        # ── CHAT (izquierda) ─────────────────────────────────────────────────
+        chat_outer = tk.Frame(body_frame, bg=C['bg3'],
+                              highlightbackground=C['border'], highlightthickness=1)
+        chat_outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                        padx=(10, 4), pady=8)
+
         self.chat_display = scrolledtext.ScrolledText(
-            chat_frame,
+            chat_outer,
             wrap=tk.WORD,
-            font=('Arial', 10),
-            bg='#ffffff',
-            fg='#2c3e50',
+            font=('Consolas', 10),   # D — fuente monoespaciada
+            bg=C['bg3'],
+            fg=C['text'],
+            insertbackground=C['accent'],
+            selectbackground=C['border'],
             state=tk.DISABLED,
             relief=tk.FLAT,
-            padx=10,
-            pady=10
+            bd=0,
+            padx=12, pady=10
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
-        
-        # Tags
-        self.chat_display.tag_config('user', foreground='#3498db', font=('Arial', 10, 'bold'))
-        self.chat_display.tag_config('assistant', foreground='#27ae60', font=('Arial', 10, 'bold'))
-        self.chat_display.tag_config('system', foreground='#95a5a6', font=('Arial', 9, 'italic'))
-        self.chat_display.tag_config('time', foreground='#95a5a6', font=('Arial', 8))
-        
-        # Controles
-        controls_frame = tk.Frame(self.root, bg='#f0f0f0')
-        controls_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
-        
-        # Botón modo
-        mode_text = "🎤 Modo Voz" if self.audio_available else "🎤 (Audio no disponible)"
-        self.mode_button = tk.Button(
-            controls_frame,
-            text=mode_text,
-            command=self.toggle_voice_mode,
-            bg='#9b59b6',
-            fg='white',
-            font=('Arial', 9, 'bold'),
-            relief=tk.FLAT,
-            cursor='hand2' if self.audio_available else 'arrow',
-            state=tk.DISABLED,
-            padx=15,
-            pady=5
+
+        # Tags — D
+        self.chat_display.tag_config(
+            'user', foreground=C['accent'], font=('Consolas', 10, 'bold'))
+        self.chat_display.tag_config(
+            'assistant', foreground=C['green'], font=('Consolas', 10, 'bold'))
+        self.chat_display.tag_config(
+            'system', foreground=C['text_dim'], font=('Consolas', 9, 'italic'))
+        self.chat_display.tag_config(
+            'time', foreground=C['border'], font=('Consolas', 8))
+        self.chat_display.tag_config(
+            'user_bubble', background='#1c2333', relief=tk.FLAT)
+        self.chat_display.tag_config(
+            'assistant_bubble', background='#162016', relief=tk.FLAT)
+
+        # ── PANEL LATERAL DE ESTADO (derecha) — B ────────────────────────────
+        sidebar = tk.Frame(body_frame, bg=C['bg2'], width=210,
+                           highlightbackground=C['border'], highlightthickness=1)
+        sidebar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=8)
+        sidebar.pack_propagate(False)
+
+        def _sidebar_section(title):
+            tk.Label(sidebar, text=title, font=('Consolas', 8, 'bold'),
+                     fg=C['text_dim'], bg=C['bg2']).pack(
+                anchor='w', padx=10, pady=(10, 2))
+            tk.Frame(sidebar, bg=C['border'], height=1).pack(
+                fill=tk.X, padx=10, pady=(0, 6))
+
+        # Estado del robot
+        _sidebar_section("ROBOT")
+        self._sb_tracker_mode = tk.Label(sidebar, text="Modo: —",
+            font=('Consolas', 9), fg=C['text'], bg=C['bg2'])
+        self._sb_tracker_mode.pack(anchor='w', padx=12)
+        self._sb_tracker_fps = tk.Label(sidebar, text="FPS: —",
+            font=('Consolas', 9), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_tracker_fps.pack(anchor='w', padx=12)
+        self._sb_face = tk.Label(sidebar, text="Cara: No detectada",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_face.pack(anchor='w', padx=12, pady=(0, 2))
+
+        # Servos
+        _sidebar_section("SERVOS")
+        self._sb_eyes_h = tk.Label(sidebar, text="Ojos H: —",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_eyes_h.pack(anchor='w', padx=12)
+        self._sb_eyes_v = tk.Label(sidebar, text="Ojos V: —",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_eyes_v.pack(anchor='w', padx=12)
+        self._sb_neck = tk.Label(sidebar, text="Cuello: — / —",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_neck.pack(anchor='w', padx=12)
+
+        # Personalidad activa
+        _sidebar_section("PERSONALIDAD")
+        self._sb_personality = tk.Label(sidebar,
+            text=self.active_personality.upper(),
+            font=('Consolas', 10, 'bold'), fg=C['purple'], bg=C['bg2'])
+        self._sb_personality.pack(anchor='w', padx=12)
+        self._sb_voice = tk.Label(sidebar, text=f"Voz: {self.voice}",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_voice.pack(anchor='w', padx=12)
+
+        # Costos
+        _sidebar_section("COSTOS")
+        self._sb_cost_api = tk.Label(sidebar, text="API: $0.0000",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_cost_api.pack(anchor='w', padx=12)
+        self._sb_cost_vision = tk.Label(sidebar, text="Vision: $0.000",
+            font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_cost_vision.pack(anchor='w', padx=12)
+        self._sb_cost_total = tk.Label(sidebar, text="Total: $0.000",
+            font=('Consolas', 9, 'bold'), fg=C['yellow'], bg=C['bg2'])
+        self._sb_cost_total.pack(anchor='w', padx=12)
+
+        # Simulación
+        _sidebar_section("SIMULACION")
+        self._sb_sim = tk.Label(sidebar, text="● Inactiva",
+            font=('Consolas', 9), fg=C['text_dim'], bg=C['bg2'])
+        self._sb_sim.pack(anchor='w', padx=12)
+
+        # Iniciar actualización periódica del sidebar
+        self._update_sidebar()
+
+        # ══════════════════════════════════════════════════════════════════════
+        # BARRA DE CONTROLES
+        # ══════════════════════════════════════════════════════════════════════
+        controls_frame = tk.Frame(self.root, bg=C['bg2'],
+                                  highlightbackground=C['border'], highlightthickness=1)
+        controls_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        # Modo voz
+        mode_text = "🎤 Modo Voz" if self.audio_available else "🎤 (sin audio)"
+        self.mode_button = self._btn(
+            controls_frame, mode_text, self.toggle_voice_mode, '#6e40c9',
+            padx=14, pady=6,
+            state=tk.DISABLED if not self.audio_available else tk.NORMAL
         )
-        self.mode_button.pack(side=tk.LEFT)
-        
-        # Label modo
-        self.mode_label = tk.Label(
-            controls_frame,
-            text="Modo: Texto 💬",
-            font=('Arial', 9),
-            fg='#7f8c8d',
-            bg='#f0f0f0'
-        )
-        self.mode_label.pack(side=tk.LEFT, padx=10)
-        
-        # Label voz
-        self.voice_label = tk.Label(
-            controls_frame,
-            text=f"Voz: {self.voice}",
-            font=('Arial', 8),
-            fg='#95a5a6',
-            bg='#f0f0f0'
-        )
-        self.voice_label.pack(side=tk.RIGHT, padx=10)
-        
-        # Botón config
-        self.config_button = tk.Button(
-            controls_frame,
-            text="⚙️ Configuración",
-            command=self.open_config,
-            bg='#34495e',
-            fg='white',
-            font=('Arial', 9, 'bold'),
-            relief=tk.FLAT,
-            cursor='hand2',
-            padx=15,
-            pady=5
-        )
-        self.config_button.pack(side=tk.RIGHT)
-        
-        # Botón cámara
+        self.mode_button.pack(side=tk.LEFT, padx=(8, 4), pady=6)
+
+        self.mode_label = tk.Label(controls_frame, text="Texto 💬",
+                                   font=('Consolas', 8), fg=C['text_dim'], bg=C['bg2'])
+        self.mode_label.pack(side=tk.LEFT, padx=4)
+
+        # Config
+        self.config_button = self._btn(
+            controls_frame, "⚙ Config", self.open_config, '#21262d',
+            padx=12, pady=6)
+        self.config_button.pack(side=tk.RIGHT, padx=(4, 8), pady=6)
+
+        # Cámara
         if CAMERA_AVAILABLE:
-            self.camera_button = tk.Button(
-                controls_frame,
-                text="📹 Cámara",
-                command=self.toggle_camera,
-                bg='#16a085',
-                fg='white',
-                font=('Arial', 9, 'bold'),
-                relief=tk.FLAT,
-                cursor='hand2',
-                padx=15,
-                pady=5
-            )
-            self.camera_button.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        # Botón config audio
+            self.camera_button = self._btn(
+                controls_frame, "📹 Cámara", self.toggle_camera, '#196b37',
+                padx=12, pady=6)
+            self.camera_button.pack(side=tk.RIGHT, padx=4, pady=6)
+
+        # Audio config
         if self.audio_available and self.audio_device_manager:
-            self.audio_config_button = tk.Button(
-                controls_frame,
-                text="🎧 Audio",
-                command=self.open_audio_config,
-                bg='#8e44ad',
-                fg='white',
-                font=('Arial', 9, 'bold'),
-                relief=tk.FLAT,
-                cursor='hand2',
-                padx=15,
-                pady=5
-            )
-            self.audio_config_button.pack(side=tk.RIGHT, padx=(0, 5))
-        
-        # ── SELECTOR DE PERSONALIDAD ──────────────────────────────────────────
-        personality_frame = tk.Frame(self.root, bg='#2c3e50')
+            self.audio_config_button = self._btn(
+                controls_frame, "🎧 Audio", self.open_audio_config, '#5a1e8c',
+                padx=12, pady=6)
+            self.audio_config_button.pack(side=tk.RIGHT, padx=4, pady=6)
+
+        # ── SELECTOR DE PERSONALIDAD ─────────────────────────────────────────
+        personality_frame = tk.Frame(self.root, bg=C['bg'],
+                                     highlightbackground=C['border'], highlightthickness=1)
         personality_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
 
-        tk.Label(
-            personality_frame,
-            text="Personalidad:",
-            font=('Arial', 9, 'bold'),
-            fg='#ecf0f1',
-            bg='#2c3e50'
-        ).pack(side=tk.LEFT, padx=(8, 6), pady=4)
+        tk.Label(personality_frame, text="PERSONALIDAD",
+                 font=('Consolas', 8, 'bold'), fg=C['text_dim'], bg=C['bg']
+                 ).pack(side=tk.LEFT, padx=(12, 8), pady=5)
 
         self._personality_buttons = {}
-        for p_name, p_label in [("einstein", "🧑‍🔬 Einstein"), ("angelelli", "✝️ Angelelli"), ("frank", "🤖 Frank")]:
+        _pal_colors = {
+            'einstein': '#1c6ea4',
+            'angelelli': '#7a3d8c',
+            'frank': '#16614a',
+        }
+        for p_name, p_label in [("einstein", "🧑‍🔬 Einstein"),
+                                  ("angelelli", "✝ Angelelli"),
+                                  ("frank", "🤖 Frank")]:
             is_active = (p_name == self.active_personality)
-            btn = tk.Button(
-                personality_frame,
-                text=p_label,
-                command=lambda n=p_name: self.change_personality(n),
-                bg='#1abc9c' if is_active else '#7f8c8d',
-                fg='white',
-                font=('Arial', 9, 'bold'),
-                relief=tk.SUNKEN if is_active else tk.FLAT,
-                cursor='hand2',
-                padx=12,
-                pady=3
+            col = _pal_colors[p_name]
+            btn = self._btn(
+                personality_frame, p_label,
+                lambda n=p_name: self.change_personality(n),
+                col if is_active else C['bg3'],
+                padx=12, pady=4
             )
-            btn.pack(side=tk.LEFT, padx=3, pady=4)
+            if is_active:
+                btn.config(relief=tk.SUNKEN)
+            btn.pack(side=tk.LEFT, padx=3, pady=5)
             self._personality_buttons[p_name] = btn
 
-        # ── BOTÓN SIMULACIÓN DE MOVIMIENTO ────────────────────────────────────
+        # Botón simulación
         if MOTION_SIMULATOR_AVAILABLE or EYE_TRACKER_AVAILABLE:
-            self.sim_button = tk.Button(
-                personality_frame,
-                text="🎭 Simulación",
-                command=self.toggle_simulation,
-                bg='#2980b9',
-                fg='white',
-                font=('Arial', 9, 'bold'),
-                relief=tk.FLAT,
-                cursor='hand2',
-                padx=12,
-                pady=3
-            )
-            self.sim_button.pack(side=tk.RIGHT, padx=(3, 8), pady=4)
+            self.sim_button = self._btn(
+                personality_frame, "🎭 Simulación",
+                self.toggle_simulation, '#1f4f8a',
+                padx=12, pady=4)
+            self.sim_button.pack(side=tk.RIGHT, padx=(4, 12), pady=5)
 
-        # Entrada
-        self.input_frame = tk.Frame(self.root, bg='#f0f0f0')
-        self.input_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
-        
-        # Texto
+        # ══════════════════════════════════════════════════════════════════════
+        # ÁREA DE ENTRADA
+        # ══════════════════════════════════════════════════════════════════════
+        self.input_frame = tk.Frame(self.root, bg=C['bg'],
+                                    highlightbackground=C['border'], highlightthickness=1)
+        self.input_frame.pack(fill=tk.X, padx=10, pady=(0, 8))
+
         self.message_entry = tk.Text(
             self.input_frame,
             height=3,
-            font=('Arial', 10),
+            font=('Consolas', 10),
+            bg=C['bg3'],
+            fg=C['text'],
+            insertbackground=C['accent'],
+            selectbackground=C['border'],
             wrap=tk.WORD,
-            relief=tk.SOLID,
-            borderwidth=1
+            relief=tk.FLAT,
+            bd=0,
+            padx=10, pady=8
         )
-        self.message_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        self.message_entry.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 4))
         self.message_entry.bind('<Return>', self.handle_enter)
         self.message_entry.bind('<Shift-Return>', lambda e: None)
-        
-        # Botones
-        self.button_frame = tk.Frame(self.input_frame, bg='#f0f0f0')
-        self.button_frame.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Enviar
-        self.send_button = tk.Button(
-            self.button_frame,
-            text="Enviar\n(Enter)",
-            command=self.send_message,
-            bg='#3498db',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-            relief=tk.FLAT,
-            cursor='hand2',
-            width=10,
-            state=tk.DISABLED
-        )
-        self.send_button.pack()
-        
-        # Iniciar modo manos libres (VAD automático)
-        self.record_button = tk.Button(
-            self.button_frame,
-            text="🎤 Iniciar",
-            command=self.toggle_recording,
-            bg='#e74c3c',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-            relief=tk.FLAT,
-            cursor='hand2',
-            width=10,
-            state=tk.DISABLED
-        )
-        
+
+        self.button_frame = tk.Frame(self.input_frame, bg=C['bg'])
+        self.button_frame.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+
+        self.send_button = self._btn(
+            self.button_frame, "Enviar\n↵ Enter",
+            self.send_message, '#1c6ea4',
+            width=10, pady=6, state=tk.DISABLED)
+        self.send_button.pack(pady=(0, 3))
+
+        self.record_button = self._btn(
+            self.button_frame, "🎤 Iniciar",
+            self.toggle_recording, '#6b1b1b',
+            width=10, pady=6, state=tk.DISABLED)
+
         self.append_message("Sistema", "Conectando...", 'system')
         
     def handle_enter(self, event):
@@ -1822,106 +1964,152 @@ REGLAS ABSOLUTAS:
             self.send_message()
             return 'break'
         return None
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANIMACIONES Y ACTUALIZACIÓN DE UI
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def _animate_led(self):
+        """Pulsa el LED del header según el estado de conexión (C)."""
+        try:
+            self._led_pulse_state = (self._led_pulse_state + 1) % 20
+            # LED rojo: parpadea cada 1s si desconectado; verde sólido si conectado
+            if self.connected:
+                self._led_canvas.itemconfig(self._led_circle, fill=self.C['green'])
+            else:
+                col = self.C['red'] if self._led_pulse_state < 10 else '#3a1010'
+                self._led_canvas.itemconfig(self._led_circle, fill=col)
+            self.root.after(100, self._animate_led)
+        except Exception:
+            pass
+
+    def _update_sidebar(self):
+        """Actualiza el panel lateral de estado cada 500 ms (B)."""
+        try:
+            C = self.C
+            # Tracker
+            if EYE_TRACKER_AVAILABLE and self.shared_state:
+                st = self.shared_state.get_tracker_status()
+                mode = st.get('mode', 'idle')
+                fps  = st.get('fps', 0.0)
+                mode_icons = {
+                    'follow':        '🎯 Follow',
+                    'search':        '🔍 Search',
+                    'center':        '⚙ Center',
+                    'idle':          '⚪ Idle',
+                    'active_search': '🔍 Active',
+                    'reconnecting':  '🔄 Reconect',
+                }
+                self._sb_tracker_mode.config(
+                    text=f"Modo: {mode_icons.get(mode, mode)}",
+                    fg=C['green'] if mode == 'follow' else C['text'])
+                self._sb_tracker_fps.config(
+                    text=f"FPS:  {fps:.1f}",
+                    fg=C['green'] if fps > 20 else C['yellow'] if fps > 10 else C['red'])
+                face = self.shared_state.get_face_data()
+                if face and face.detected:
+                    conf = int(face.confidence * 100)
+                    self._sb_face.config(
+                        text=f"Cara: {conf}% conf",
+                        fg=C['green'] if conf > 70 else C['yellow'])
+                else:
+                    self._sb_face.config(text="Cara: no detectada", fg=C['text_dim'])
+                # Servos
+                servos = self.shared_state.get_servo_positions()
+                if servos:
+                    self._sb_eyes_h.config(
+                        text=f"Ojos H: {servos.get('left_h', 0):.0f}°")
+                    self._sb_eyes_v.config(
+                        text=f"Ojos V: {servos.get('left_v', 0):.0f}°")
+                    self._sb_neck.config(
+                        text=f"Cuello: {servos.get('neck_yaw', 0):.0f}° / "
+                             f"{servos.get('neck_pitch', 0):.0f}°")
+            # Personalidad
+            self._sb_personality.config(text=self.active_personality.upper())
+            self._sb_voice.config(text=f"Voz: {self.voice}")
+            # Costos
+            api_c = (self.input_tokens / 1_000_000 * PRICE_INPUT +
+                     self.output_tokens / 1_000_000 * PRICE_OUTPUT)
+            total = api_c + self.gpt4v_total_cost
+            self._sb_cost_api.config(text=f"API:    ${api_c:.4f}")
+            self._sb_cost_vision.config(text=f"Vision: ${self.gpt4v_total_cost:.3f}")
+            self._sb_cost_total.config(
+                text=f"Total:  ${total:.3f}",
+                fg=C['red'] if total > 0.50 else C['yellow'] if total > 0.10 else C['green'])
+            # Simulación
+            if self.simulation_running:
+                self._sb_sim.config(text="● Activa", fg=C['green'])
+            else:
+                self._sb_sim.config(text="● Inactiva", fg=C['text_dim'])
+        except Exception:
+            pass
+        self.root.after(500, self._update_sidebar)
     
-    def update_activity_status(self, status, color='#95a5a6'):
-        """Actualiza el indicador visual de actividad"""
-        status_icons = {
-            'idle': '⚪',
-            'listening': '🎤',
-            'processing': '🤔',
-            'speaking': '🗣️',
-            'interrupted': '🚫'
+    def update_activity_status(self, status, color=None):
+        """Actualiza el indicador visual de actividad (dark mode)."""
+        C = self.C
+        _map = {
+            'idle':        ('⚪  Inactivo',       C['text_dim']),
+            'listening':   ('🎤  Escuchando...',  C['accent']),
+            'processing':  ('💭  Pensando...',    C['yellow']),
+            'speaking':    ('🗣  Hablando...',    C['green']),
+            'interrupted': ('🚫  Interrumpido',   C['red']),
         }
-        
-        status_texts = {
-            'idle': 'Inactivo',
-            'listening': 'Escuchando...',
-            'processing': 'Pensando...',
-            'speaking': 'Hablando...',
-            'interrupted': 'Interrumpido'
-        }
-        
-        icon = status_icons.get(status, '⚪')
-        text = status_texts.get(status, 'Inactivo')
-        
-        self.activity_label.config(
-            text=f"{icon} {text}",
-            fg=color
-        )
+        text, col = _map.get(status, ('⚪  Inactivo', C['text_dim']))
+        if color:
+            col = color
+        self.activity_label.config(text=text, fg=col)
     
     def set_volume_level(self, level):
         """Establece el nivel de volumen visual (0-100)"""
         self.current_volume_level = max(0, min(100, level))
-    
+
     def animate_volume(self):
-        """Anima las barras de volumen"""
+        """Anima el VU meter dark mode — 12 barras tricolor."""
         try:
-            # Calcular cuántas barras mostrar basado en el nivel
-            num_bars = int((self.current_volume_level / 100) * 10)
-            
-            for i, bar in enumerate(self.volume_bars):
+            num_bars = int((self.current_volume_level / 100) * 12)
+            for i, (bar, active_col) in enumerate(self.volume_bars):
+                h = 4 + i * 1.2   # altura gradual
                 if i < num_bars:
-                    # Barra activa con gradiente de color
-                    if i < 6:
-                        color = '#27ae60'  # Verde
-                    elif i < 8:
-                        color = '#f39c12'  # Amarillo
-                    else:
-                        color = '#e74c3c'  # Rojo
-                    
-                    height = 5 + (i * 2)  # Altura gradual
-                    self.volume_canvas.coords(bar, 
-                        i * 20, 30 - height,
-                        i * 20 + 15, 30
-                    )
-                    self.volume_canvas.itemconfig(bar, fill=color)
+                    self.volume_canvas.coords(bar, i * 12, 18 - h, i * 12 + 9, 18)
+                    self.volume_canvas.itemconfig(bar, fill=active_col)
                 else:
-                    # Barra inactiva
-                    self.volume_canvas.coords(bar,
-                        i * 20, 30,
-                        i * 20 + 15, 30
-                    )
-                    self.volume_canvas.itemconfig(bar, fill='#34495e')
-            
-            # Decay suave del volumen
+                    self.volume_canvas.coords(bar, i * 12, 18, i * 12 + 9, 18)
+                    self.volume_canvas.itemconfig(bar, fill=self.C['border'])
             if self.current_volume_level > 0:
-                self.current_volume_level *= 0.85
-            
-            # Continuar animación
-            self.root.after(50, self.animate_volume)
-        except:
+                self.current_volume_level *= 0.82
+            self.root.after(40, self.animate_volume)
+        except Exception:
             pass
         
     def append_message(self, sender, message, tag='user'):
         self.chat_display.config(state=tk.NORMAL)
         time_str = datetime.now().strftime("%H:%M:%S")
-        self.chat_display.insert(tk.END, f"[{time_str}] ", 'time')
+        # Separador de burbuja según rol
+        bubble_tag = 'user_bubble' if tag == 'user' else (
+                     'assistant_bubble' if tag == 'assistant' else None)
+        self.chat_display.insert(tk.END, f" {time_str}  ", 'time')
         self.chat_display.insert(tk.END, f"{sender}: ", tag)
-        self.chat_display.insert(tk.END, f"{message}\n\n")
+        if bubble_tag:
+            self.chat_display.insert(tk.END, f"{message}\n\n", bubble_tag)
+        else:
+            self.chat_display.insert(tk.END, f"{message}\n\n")
         self.chat_display.config(state=tk.DISABLED)
         self.chat_display.see(tk.END)
         
     def update_stats(self):
-        # Costo Realtime API
-        api_cost = (self.input_tokens / 1_000_000 * PRICE_INPUT + 
+        api_cost = (self.input_tokens / 1_000_000 * PRICE_INPUT +
                     self.output_tokens / 1_000_000 * PRICE_OUTPUT)
-        
-        # Costo total incluyendo GPT-4V
         total = api_cost + self.gpt4v_total_cost
-        
-        stats_text = (f"Tokens: {self.input_tokens:,} in, {self.output_tokens:,} out | "
-                     f"API: ${api_cost:.4f}")
-        
-        # Agregar costos GPT-4V si hay análisis
+        stats_text = (f"↑{self.input_tokens:,} ↓{self.output_tokens:,} tokens  "
+                      f"API ${api_cost:.4f}")
         if self.gpt4v_analyses_count > 0:
-            stats_text += f" | 📸 Vision: ${self.gpt4v_total_cost:.3f} ({self.gpt4v_analyses_count}x)"
-        
-        stats_text += f" | 💰 Total: ${total:.3f}"
-        
+            stats_text += f"  📸 ${self.gpt4v_total_cost:.3f}"
+        stats_text += f"  💰 ${total:.3f}"
         self.stats_label.config(text=stats_text)
         
     def update_status(self, status, color):
-        self.status_label.config(text=f"● {status}", fg=color)
+        self.status_label.config(text=status, fg=color)
         
     def on_message(self, ws, message):
         try:
@@ -3035,13 +3223,16 @@ REGLAS ABSOLUTAS:
         self.active_personality = name
         self.voice = voice
         self.instructions = build_fn()
-        self.voice_label.config(text=f"Voz: {self.voice}")
+        if hasattr(self, 'voice_label'):
+            self.voice_label.config(text=f"Voz: {self.voice}")
 
         # Actualizar aspecto visual de los botones inmediatamente
+        _pal_colors = {'einstein': '#1c6ea4', 'angelelli': '#7a3d8c', 'frank': '#16614a'}
         for p_name, btn in self._personality_buttons.items():
+            col = _pal_colors.get(p_name, '#21262d')
             btn.config(
                 relief=tk.SUNKEN if p_name == name else tk.FLAT,
-                bg='#1abc9c' if p_name == name else '#7f8c8d'
+                bg=col if p_name == name else self.C['bg3']
             )
 
         # Limpiar memoria conversacional — contexto de la sesión anterior
@@ -3155,7 +3346,8 @@ REGLAS ABSOLUTAS:
             self.voice = voice_var.get()
             self.temperature = temp_var.get()
             self.instructions = inst_text.get('1.0', tk.END).strip()
-            self.voice_label.config(text=f"Voz: {self.voice}")
+            if hasattr(self, 'voice_label'):
+                self.voice_label.config(text=f"Voz: {self.voice}")
             self.update_session_config()
             self.append_message("Sistema", f"✓ Config guardada: {self.voice}, Temp={self.temperature}", 'system')
             config_win.destroy()
